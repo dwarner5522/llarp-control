@@ -1,0 +1,482 @@
+#!/usr/bin/env python3
+"""llarpctl: command line control for llarpd (same settings and daemon as LLARP Control).
+
+Works over SSH: `llarpctl start` launches llarpd in the background, so it keeps
+running after you log out.
+"""
+
+import argparse
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import llarp_core as core  # noqa: E402
+from llarp_core import LlarpError  # noqa: E402
+
+SERVICE_NAME = "llarp-control"
+
+USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+
+
+def color(text, code):
+    return f"\033[{code}m{text}\033[0m" if USE_COLOR else text
+
+
+def green(t):
+    return color(t, "32")
+
+
+def red(t):
+    return color(t, "31")
+
+
+def dim(t):
+    return color(t, "2")
+
+
+def bold(t):
+    return color(t, "1")
+
+
+def on_off(value):
+    return green("on") if value else dim("off")
+
+
+def restart_hint(ctl):
+    if ctl.changes_pending():
+        print(dim("llarpd is running; apply with: llarpctl restart"))
+
+
+# ---------------------------------------------------------------- commands
+
+
+def cmd_status(ctl, args):
+    st = ctl.status()
+    if args.json:
+        print(json.dumps(st, indent=2))
+        return
+    if st["running"]:
+        line = f"{green('running')}  pid {st['pid']}  up {core.format_uptime(st['uptime'] or 0)}"
+        if ctl.stopping():
+            line = f"{color('stopping', '33')}  pid {st['pid']}"
+    else:
+        line = red("stopped")
+    print(f"{bold('llarpd')}      {line}")
+    addr = st["address"] or dim(st["address_kind"])
+    kind = f"  {dim('(' + st['address_kind'] + ')')}" if st["address"] else ""
+    print(f"address     {addr}{kind}")
+    print(f"mode        {'router (relay)' if st['router_mode'] else 'client'}")
+    print(f"exit node   {on_off(st['exit_node'])}")
+    if st["exit_node"]:
+        target, why = ctl.nat_target()
+        applied = ctl.nat_applied()
+        fwd = on_off(core.ip_forward_enabled())
+        if target is None:
+            nat = dim(f"unknown ({why})")
+        elif applied == target:
+            nat = green(f"set up for {target[0]} via {target[1]}")
+        else:
+            nat = f"not set up for {target[0]} via {target[1]}  {dim('(llarpctl forwarding enable)')}"
+        print(f"forwarding  ip_forward {fwd} · NAT {nat}")
+    vpn = st["vpn"]
+    vpn_color = {"on": green, "trouble": red, "off": dim}.get(vpn["state"], lambda t: color(t, "33"))
+    print(f"vpn         {vpn_color(vpn['detail'])}")
+    print(f"bootstraps  {st['bootstraps_enabled']} enabled of {len(ctl.settings['bootstraps'])}")
+    if st["changes_pending"]:
+        print(color("settings changed since start; apply with: llarpctl restart", "33"))
+    if st["unmanaged_pids"]:
+        pids = ", ".join(map(str, st["unmanaged_pids"]))
+        print(color(f"note: another llarpd not started by llarpctl is running (pid {pids})", "33"))
+
+
+def cmd_start(ctl, args):
+    if args.foreground:
+        sys.exit(ctl.run_foreground())
+    pid = ctl.start()
+    print(f"llarpd started (pid {pid}); log: {core.LOG_FILE}")
+    if args.wait:
+        wait_for_address(ctl, args.wait)
+
+
+def wait_for_address(ctl, timeout):
+    deadline = time.time() + timeout
+    while time.time() < deadline and ctl.is_running():
+        addr, kind = ctl.address()
+        if addr:
+            print(f"address: {addr}  ({kind})")
+            return
+        time.sleep(0.5)
+    if not ctl.is_running():
+        raise LlarpError("llarpd exited; see: llarpctl log")
+    print(dim("address not known yet; check later with: llarpctl address"))
+
+
+def cmd_stop(ctl, _args):
+    if ctl.stop():
+        print("llarpd stopped" if not ctl.is_running() else red("llarpd is still running"))
+    else:
+        print("llarpd is not running")
+
+
+def cmd_restart(ctl, args):
+    if ctl.is_running():
+        ctl.stop()
+    cmd_start(ctl, argparse.Namespace(foreground=False, wait=args.wait))
+
+
+def cmd_address(ctl, args):
+    addr, kind = ctl.address()
+    if addr:
+        print(addr if args.quiet else f"{addr}  {dim('(' + kind + ')')}")
+    else:
+        if not args.quiet:
+            print(dim(kind))
+        sys.exit(1)
+
+
+def cmd_log(_ctl, args):
+    if not core.LOG_FILE.exists():
+        print(dim("no log yet"))
+        return
+    argv = ["tail", "-n", str(args.lines)]
+    if args.follow:
+        argv.append("-F")
+    argv.append(str(core.LOG_FILE))
+    try:
+        subprocess.run(argv)
+    except KeyboardInterrupt:
+        pass
+
+
+def cmd_bootstrap(ctl, args):
+    action = args.action
+    if action == "list":
+        entries = ctl.settings["bootstraps"]
+        if not entries:
+            print(dim("no bootstraps; llarpd uses its config / built-in fallbacks"))
+        for i, entry in enumerate(entries, 1):
+            ok, summary, details = core.describe_bootstrap(entry)
+            mark = green("[x]") if entry.get("enabled", True) else "[ ]"
+            print(f"{i:>2}. {mark} {bold(entry['name'])}")
+            print(f"        {summary if ok else red(summary)}")
+            if args.verbose:
+                for d in details:
+                    print(f"          {dim(d)}")
+        bundled = ctl.bundled_bootstraps()
+        if bundled and args.verbose:
+            print(dim("bundled (add by name): " + ", ".join(p.stem for p in bundled)))
+    elif action == "add":
+        if not args.sources:
+            raise LlarpError("give one or more files, URLs, or bundled names (e.g. opennet)")
+        failed = False
+        for src in args.sources:
+            try:
+                entry, info = ctl.add_bootstrap(src)
+                nets = ", ".join(sorted({n for _, n in info}))
+                print(f"added {entry['name']}: {len(info)} router(s), net {nets}")
+            except LlarpError as e:
+                print(red(f"error: {e}"), file=sys.stderr)
+                failed = True
+        restart_hint(ctl)
+        if failed:
+            sys.exit(1)
+    elif action in ("remove", "enable", "disable"):
+        if not args.sources:
+            raise LlarpError(f"which bootstrap? give its number or name (see: llarpctl bootstrap list)")
+        entries = [ctl.find_bootstrap(ref) for ref in args.sources]
+        for entry in entries:
+            if action == "remove":
+                ctl.remove_bootstrap(entry)
+                print(f"removed {entry['name']}")
+            else:
+                ctl.set_bootstrap_enabled(entry, action == "enable")
+                print(f"{action}d {entry['name']}")
+        restart_hint(ctl)
+
+
+def cmd_exit(ctl, args):
+    if args.state is None:
+        print(f"exit node {on_off(ctl.settings.get('exit_node'))}")
+        return
+    enable = args.state == "on"
+    for n in ctl.set_exit_node(enable):
+        print(n)
+    print(f"exit node {on_off(enable)}")
+    if ctl.is_running():
+        print("restarting llarpd to apply")
+        cmd_restart(ctl, argparse.Namespace(wait=20 if enable else 0))
+    if enable:
+        addr, _ = ctl.address()
+        if addr:
+            print(f"\nusers can route through you with:\n  [network]\n  exit-node={addr}")
+        print(dim("\nalso required once per boot: llarpctl forwarding enable"))
+
+
+def cmd_vpn(ctl, args):
+    target = args.target
+    if target is None or target == "status":
+        st = ctl.vpn_status()
+        print(st["detail"])
+        sys.exit(0 if st["state"] in ("on", "off") else 1)
+    if target == "list":
+        current = ctl.settings.get("use_exit")
+        if not ctl.saved_exits():
+            print(dim("no saved exits; connect with: llarpctl vpn ADDRESS.loki"))
+        for e in ctl.saved_exits():
+            mark = green("*") if e["address"] == current else " "
+            print(f"{mark} {e['address']}{dim('  (auth code set)') if e.get('auth') else ''}")
+        return
+    if target == "forget":
+        if not args.address:
+            raise LlarpError("which exit? llarpctl vpn forget ADDRESS")
+        ctl.forget_exit(args.address)
+        print(f"forgot {ctl.normalize_exit(args.address)}")
+        return
+    if target == "off":
+        was = ctl.settings.get("use_exit")
+        ctl.set_vpn(None)
+        print("VPN off" + (f" (was {was})" if was else ""))
+    else:
+        if target == "on":
+            saved = ctl.saved_exits()
+            if not saved:
+                raise LlarpError("no saved exit; give an address: llarpctl vpn ADDRESS.loki")
+            target = saved[0]["address"]
+        address = ctl.set_vpn(target, args.auth)
+        print(f"VPN on via {address}")
+    was_running = ctl.is_running()
+    if was_running:
+        print("restarting llarpd to apply")
+        ctl.stop()
+    if ctl.settings.get("use_exit"):
+        ctl.start()
+        deadline = time.time() + args.wait
+        st = ctl.vpn_status()
+        while time.time() < deadline and st["state"] in ("connecting", "trouble") and ctl.is_running():
+            time.sleep(1)
+            st = ctl.vpn_status()
+        print(st["detail"])
+    elif was_running:
+        ctl.start()
+        print("llarpd restarted without VPN")
+
+
+def cmd_persist(ctl, args):
+    if args.state is None:
+        print(f"permanent address {on_off(ctl.keyfile_path() is not None)}")
+        return
+    ctl.set_persistent_address(args.state == "on")
+    print(f"permanent address {on_off(args.state == 'on')}")
+    restart_hint(ctl)
+
+
+def cmd_forwarding(ctl, args):
+    target, why = ctl.nat_target()
+    if args.action == "status" or args.action is None:
+        print(f"ip_forward  {on_off(core.ip_forward_enabled())}")
+        if target is None:
+            print(f"NAT         unknown ({why})")
+        else:
+            applied = ctl.nat_applied() == target
+            print(f"NAT         {target[0]} via {target[1]}: {green('set up') if applied else 'not set up by llarpctl'}")
+        return
+    if target is None:
+        raise LlarpError(f"can't set up forwarding: {why}")
+    enable = args.action == "enable"
+    script = ctl.forwarding_script(enable, target)
+    argv = ctl.privileged_command(script)
+    print(dim("running: " + " ".join(argv[:-1]) + " '" + script + "'"))
+    if subprocess.run(argv).returncode != 0:
+        raise LlarpError("command failed")
+    ctl.mark_nat(target if enable else None)
+    ctl.note(f"forwarding {'enabled' if enable else 'removed'} for {target[0]} via {target[1]}")
+    print(f"forwarding {'enabled' if enable else 'removed'} for {target[0]} via {target[1]}")
+
+
+def cmd_settings(ctl, args):
+    if args.key is None:
+        for key in ("llarpd", "config", "log_level", "router_mode", "exit_node"):
+            print(f"{key:<12} {ctl.settings.get(key)}")
+        print(f"{'data_dir':<12} {ctl.data_dir()}  {dim('(from config)')}")
+        print(f"{'files':<12} {core.CONFIG_DIR}")
+        return
+    if args.value is None:
+        print(ctl.settings.get(args.key))
+        return
+    value = args.value
+    if args.key in ("router_mode", "exit_node"):
+        if value.lower() not in ("on", "off", "true", "false", "1", "0", "yes", "no"):
+            raise LlarpError(f"{args.key} takes on/off")
+        value = value.lower() in ("on", "true", "1", "yes")
+    elif args.key in ("llarpd", "config"):
+        value = str(Path(value).expanduser().resolve())
+    ctl.set_setting(args.key, value)
+    print(f"{args.key} = {value}")
+    restart_hint(ctl)
+
+
+def cmd_generate_config(ctl, _args):
+    cfg, output = ctl.generate_config()
+    if output.strip():
+        print(output.rstrip())
+    print(f"generated {cfg}")
+
+
+def cmd_autostart(ctl, args):
+    root = os.geteuid() == 0
+    if root:
+        unit_path = Path(f"/etc/systemd/system/{SERVICE_NAME}.service")
+        systemctl = ["systemctl"]
+    else:
+        unit_path = Path.home() / ".config" / "systemd" / "user" / f"{SERVICE_NAME}.service"
+        systemctl = ["systemctl", "--user"]
+
+    if args.state is None:
+        res = subprocess.run(systemctl + ["is-enabled", SERVICE_NAME], capture_output=True, text=True)
+        print(f"autostart {on_off(res.stdout.strip() == 'enabled')}  {dim(str(unit_path))}")
+        return
+
+    if args.state == "off":
+        subprocess.run(systemctl + ["disable", SERVICE_NAME])
+        unit_path.unlink(missing_ok=True)
+        subprocess.run(systemctl + ["daemon-reload"])
+        print("autostart off")
+        return
+
+    script = Path(__file__).resolve()
+    env_lines = f"Environment=XDG_CONFIG_HOME={core.CONFIG_DIR.parent}\n"
+    unit = (
+        "[Unit]\n"
+        "Description=llarpd via llarpctl\n"
+        "Wants=network-online.target\n"
+        "After=network-online.target\n\n"
+        "[Service]\n"
+        "Type=simple\n"
+        f"{env_lines}"
+        f"ExecStart={sys.executable} {script} start --foreground\n"
+        "KillMode=mixed\n"
+        "Restart=on-failure\n"
+        "RestartSec=10\n\n"
+        "[Install]\n"
+        f"WantedBy={'multi-user.target' if root else 'default.target'}\n"
+    )
+    unit_path.parent.mkdir(parents=True, exist_ok=True)
+    unit_path.write_text(unit)
+    subprocess.run(systemctl + ["daemon-reload"], check=True)
+    subprocess.run(systemctl + ["enable", SERVICE_NAME], check=True)
+    print(f"autostart on: {unit_path}")
+    print(f"llarpd will start at {'boot' if root else 'login'} via systemd.")
+    if ctl.is_running():
+        print(dim(f"it's running now outside systemd; to hand it over: llarpctl stop && {' '.join(systemctl)} start {SERVICE_NAME}"))
+    else:
+        print(dim(f"start it now with: {' '.join(systemctl)} start {SERVICE_NAME}"))
+    if not root:
+        print(dim(f"to keep it running without being logged in: sudo loginctl enable-linger {os.environ.get('USER', '$USER')}"))
+
+
+# ---------------------------------------------------------------- argument parsing
+
+
+def build_parser():
+    p = argparse.ArgumentParser(
+        prog="llarpctl",
+        description="Control llarpd from the command line. Shares settings and the running daemon with LLARP Control.",
+    )
+    sub = p.add_subparsers(dest="command", metavar="COMMAND")
+
+    s = sub.add_parser("status", help="show whether llarpd is running, its address and modes")
+    s.add_argument("--json", action="store_true", help="machine-readable output")
+    s.set_defaults(func=cmd_status)
+
+    s = sub.add_parser("start", help="turn llarpd on (runs in the background)")
+    s.add_argument("-f", "--foreground", action="store_true", help="stay attached (for systemd)")
+    s.add_argument("-w", "--wait", type=int, nargs="?", const=30, default=0, metavar="SECS",
+                   help="wait up to SECS (default 30) and print the address")
+    s.set_defaults(func=cmd_start)
+
+    s = sub.add_parser("stop", help="turn llarpd off")
+    s.set_defaults(func=cmd_stop)
+
+    s = sub.add_parser("restart", help="restart llarpd to apply changes")
+    s.add_argument("-w", "--wait", type=int, nargs="?", const=30, default=0, metavar="SECS")
+    s.set_defaults(func=cmd_restart)
+
+    s = sub.add_parser("address", help="print this node's .loki / .snode address")
+    s.add_argument("-q", "--quiet", action="store_true", help="address only (for scripts)")
+    s.set_defaults(func=cmd_address)
+
+    s = sub.add_parser("log", help="show llarpd's log")
+    s.add_argument("-f", "--follow", action="store_true", help="keep printing new lines (Ctrl-C to stop)")
+    s.add_argument("-n", "--lines", type=int, default=50)
+    s.set_defaults(func=cmd_log)
+
+    s = sub.add_parser("bootstrap", aliases=["bs"], help="manage bootstrap files",
+                       description="sources for 'add' can be files, http(s) URLs, or bundled names like 'opennet'. "
+                                   "remove/enable/disable take numbers or names from 'list'.")
+    s.add_argument("action", choices=["list", "add", "remove", "enable", "disable"], nargs="?", default="list")
+    s.add_argument("sources", nargs="*", metavar="ITEM")
+    s.add_argument("-v", "--verbose", action="store_true", help="list every router in each file")
+    s.set_defaults(func=cmd_bootstrap)
+
+    s = sub.add_parser("exit", help="turn exit node mode on/off (restarts llarpd if running)")
+    s.add_argument("state", choices=["on", "off"], nargs="?")
+    s.set_defaults(func=cmd_exit)
+
+    s = sub.add_parser("forwarding", aliases=["fwd"], help="IP forwarding + NAT for exit mode (uses sudo)")
+    s.add_argument("action", choices=["status", "enable", "disable"], nargs="?")
+    s.set_defaults(func=cmd_forwarding)
+
+    s = sub.add_parser("vpn", help="route your internet traffic through a .loki exit node",
+                       description="llarpctl vpn ADDRESS.loki [--auth CODE]   connect (starts llarpd if needed)\n"
+                                   "llarpctl vpn on | off                       reconnect to the last exit / disconnect\n"
+                                   "llarpctl vpn status | list | forget ADDRESS",
+                       formatter_class=argparse.RawDescriptionHelpFormatter)
+    s.add_argument("target", nargs="?", metavar="ADDRESS|on|off|status|list|forget")
+    s.add_argument("address", nargs="?", help=argparse.SUPPRESS)
+    s.add_argument("--auth", help="auth code for a private exit (\"\" clears it)")
+    s.add_argument("-w", "--wait", type=int, default=30, metavar="SECS", help="wait for the connection (default 30)")
+    s.set_defaults(func=cmd_vpn)
+
+    s = sub.add_parser("persist", help="keep the same .loki address across restarts (on/off)")
+    s.add_argument("state", choices=["on", "off"], nargs="?")
+    s.set_defaults(func=cmd_persist)
+
+    s = sub.add_parser("settings", aliases=["set"], help="show or change settings",
+                       description="keys: llarpd, config, log_level, router_mode, exit_node")
+    s.add_argument("key", nargs="?", choices=["llarpd", "config", "log_level", "router_mode", "exit_node"])
+    s.add_argument("value", nargs="?")
+    s.set_defaults(func=cmd_settings)
+
+    s = sub.add_parser("generate-config", help="create a default llarpd config at the configured path")
+    s.set_defaults(func=cmd_generate_config)
+
+    s = sub.add_parser("autostart", help="start llarpd at boot via systemd (on/off)")
+    s.add_argument("state", choices=["on", "off"], nargs="?")
+    s.set_defaults(func=cmd_autostart)
+    return p
+
+
+def main():
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)  # quiet exit when piped into head etc.
+    sys.stdout.reconfigure(line_buffering=True)
+    parser = build_parser()
+    args = parser.parse_args()
+    if not args.command:
+        args = parser.parse_args(["status"])
+    ctl = core.Controller()
+    try:
+        args.func(ctl, args)
+    except LlarpError as e:
+        print(red(f"error: {e}"), file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()
