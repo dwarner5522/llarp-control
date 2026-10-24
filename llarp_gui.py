@@ -545,7 +545,11 @@ class App(Gtk.Window):
             self.start_daemon()
         elif not st.get("stop_requested_at"):
             self.notebook.set_current_page(1)
-            self.error("llarpd stopped unexpectedly. See the Log tab for details.")
+            reason = self.ctl.exit_reason()
+            if reason:
+                self.error(f"llarpd couldn't start: {reason}")
+            else:
+                self.error("llarpd stopped unexpectedly. See the Log tab for details.")
 
     # ---- daemon control
 
@@ -943,18 +947,43 @@ class App(Gtk.Window):
         self.router_handler = self.router_check.connect("toggled", self.on_router_toggled)
         grid.attach(self.router_check, 1, 3, 2, 1)
 
+        # router mode behind NAT
+        grid.attach(Gtk.Label(label="Public IP", xalign=1), 0, 4, 1, 1)
+        pub = Gtk.Box(spacing=6)
+        self.public_ip_entry = Gtk.Entry(text=self.ctl.settings.get("public_ip", ""), hexpand=True)
+        self.public_ip_entry.set_placeholder_text("only for router mode behind a home router (NAT)")
+        self.public_ip_entry.set_tooltip_text(
+            "Router mode needs a public IP. If this machine is behind a router, enter the router's public IP "
+            "and forward the UDP port on the router to this machine. Leave empty on a VPS."
+        )
+        self.public_ip_entry.connect("focus-out-event", lambda w, _e: self.set_public_ip(w.get_text()))
+        self.public_ip_entry.connect("activate", lambda w: self.set_public_ip(w.get_text()))
+        pub.pack_start(self.public_ip_entry, True, True, 0)
+        pub.pack_start(Gtk.Label(label="UDP port"), False, False, 0)
+        self.public_port_spin = Gtk.SpinButton.new_with_range(1, 65535, 1)
+        self.public_port_spin.set_value(self.ctl.settings.get("public_port", 1090))
+        self.public_port_handler = self.public_port_spin.connect(
+            "value-changed", lambda w: self.set_setting("public_port", w.get_value_as_int())
+        )
+        pub.pack_start(self.public_port_spin, False, False, 0)
+        grid.attach(pub, 1, 4, 1, 1)
+        detect = Gtk.Button(label="Detect")
+        detect.set_tooltip_text("Look up this network's public IP (asks api.ipify.org)")
+        detect.connect("clicked", lambda _: self.detect_public_ip())
+        grid.attach(detect, 2, 4, 1, 1)
+
         self.persist_check = Gtk.CheckButton(label="Keep the same .loki address across restarts")
         self.persist_check.set_tooltip_text(
             f"Stores a key file in llarpd's data dir via conf.d/{core.OVERRIDE_NAME}. Required for an exit node."
         )
         self.persist_check.set_active(self.ctl.keyfile_path() is not None)
         self.persist_handler = self.persist_check.connect("toggled", self.on_persist_toggled)
-        grid.attach(self.persist_check, 1, 4, 2, 1)
+        grid.attach(self.persist_check, 1, 5, 2, 1)
 
         gen = Gtk.Button(label="Generate default config")
         gen.set_tooltip_text("Run llarpd --generate for the config path above (won't overwrite an existing file)")
         gen.connect("clicked", lambda _: self.generate_config())
-        grid.attach(gen, 1, 5, 1, 1)
+        grid.attach(gen, 1, 6, 1, 1)
 
         note = Gtk.Label(xalign=0, wrap=True)
         note.get_style_context().add_class("dim-label")
@@ -962,7 +991,7 @@ class App(Gtk.Window):
             "Changes take effect the next time llarpd starts. "
             "Everything here can also be done from a terminal or over SSH with llarpctl."
         )
-        grid.attach(note, 1, 6, 2, 1)
+        grid.attach(note, 1, 7, 2, 1)
         return grid
 
     def sync_settings_widgets(self):
@@ -975,6 +1004,11 @@ class App(Gtk.Window):
         self.level_combo.set_active_id(s.get("log_level", "info"))
         self.level_combo.handler_unblock(self.level_handler)
         self.set_check(self.router_check, self.router_handler, s.get("router_mode", False))
+        if not self.public_ip_entry.has_focus():
+            self.public_ip_entry.set_text(s.get("public_ip", ""))
+        self.public_port_spin.handler_block(self.public_port_handler)
+        self.public_port_spin.set_value(s.get("public_port", 1090))
+        self.public_port_spin.handler_unblock(self.public_port_handler)
         self.set_check(self.persist_check, self.persist_handler, self.ctl.keyfile_path() is not None)
 
     def on_router_toggled(self, check):
@@ -995,6 +1029,29 @@ class App(Gtk.Window):
         if key == "config":
             self.set_check(self.persist_check, self.persist_handler, self.ctl.keyfile_path() is not None)
         self.refresh_all()
+
+    def set_public_ip(self, text):
+        text = text.strip()
+        if text == self.ctl.settings.get("public_ip", ""):
+            return
+        try:
+            self.ctl.set_setting("public_ip", text)
+        except LlarpError as e:
+            self.error(str(e))
+            self.public_ip_entry.set_text(self.ctl.settings.get("public_ip", ""))
+        self.refresh_all()
+
+    def detect_public_ip(self):
+        def work():
+            try:
+                ip = core.detect_public_ip()
+            except LlarpError as e:
+                GLib.idle_add(self.error, str(e))
+                return
+            GLib.idle_add(self.public_ip_entry.set_text, ip)
+            GLib.idle_add(self.set_public_ip, ip)
+
+        threading.Thread(target=work, daemon=True).start()
 
     def generate_config(self):
         try:

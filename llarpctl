@@ -298,9 +298,12 @@ def cmd_forwarding(ctl, args):
     print(f"forwarding {'enabled' if enable else 'removed'} for {target[0]} via {target[1]}")
 
 
+KEYS = ("llarpd", "config", "log_level", "router_mode", "public_ip", "public_port", "exit_node")
+
+
 def cmd_settings(ctl, args):
     if args.key is None:
-        for key in ("llarpd", "config", "log_level", "router_mode", "exit_node"):
+        for key in KEYS:
             print(f"{key:<12} {ctl.settings.get(key)}")
         print(f"{'data_dir':<12} {ctl.data_dir()}  {dim('(from config)')}")
         print(f"{'files':<12} {core.CONFIG_DIR}")
@@ -315,6 +318,10 @@ def cmd_settings(ctl, args):
         value = value.lower() in ("on", "true", "1", "yes")
     elif args.key in ("llarpd", "config"):
         value = str(Path(value).expanduser().resolve())
+    elif args.key == "public_ip" and value.lower() == "auto":
+        value = core.detect_public_ip()
+    elif args.key == "public_ip" and value.lower() in ("none", "off"):
+        value = ""
     ctl.set_setting(args.key, value)
     print(f"{args.key} = {value}")
     restart_hint(ctl)
@@ -447,8 +454,10 @@ def build_parser():
     s.set_defaults(func=cmd_persist)
 
     s = sub.add_parser("settings", aliases=["set"], help="show or change settings",
-                       description="keys: llarpd, config, log_level, router_mode, exit_node")
-    s.add_argument("key", nargs="?", choices=["llarpd", "config", "log_level", "router_mode", "exit_node"])
+                       description="keys: " + ", ".join(KEYS) + ". public_ip/public_port are for router "
+                                   "mode behind NAT (forward that UDP port to this machine); "
+                                   "'set public_ip auto' detects it, 'set public_ip none' clears it")
+    s.add_argument("key", nargs="?", choices=KEYS)
     s.add_argument("value", nargs="?")
     s.set_defaults(func=cmd_settings)
 

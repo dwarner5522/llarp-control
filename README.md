@@ -76,6 +76,9 @@ llarpctl --help
 
 ## Notes
 
+- Router (relay) mode needs a public IP. On a VPS it's found automatically. Behind a home
+  router, set it with `llarpctl set public_ip auto` (or Settings → Public IP in the GUI) and
+  forward that UDP port (default 1090) on the router to this machine.
 - The VPN client and the exit node must run compatible llarpd versions. If the exit
   answers but its replies can't be read, compare `llarpd --version` on both machines.
 - Settings, state and the llarpd log live in `~/.config/llarp-gui/`.

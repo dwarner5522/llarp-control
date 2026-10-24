@@ -6,6 +6,7 @@ either front end can control a daemon the other one started.
 """
 
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -34,6 +35,9 @@ DEFAULT_SETTINGS = {
     "llarpd": shutil.which("llarpd") or "/usr/local/bin/llarpd",
     "config": str(Path.home() / ".llarpd" / "llarpd.ini"),
     "router_mode": False,
+    # router mode behind NAT: the public IP/port the home router forwards to this machine
+    "public_ip": "",
+    "public_port": 1090,
     "log_level": "info",
     "exit_node": False,
     "use_exit": None,  # .loki exit to route internet traffic through (VPN), or None
@@ -203,6 +207,50 @@ def half_default_route_dev():
     return m.group(1) if m else None
 
 
+def is_public_ipv4(addr):
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return False
+    return ip.version == 4 and ip.is_global
+
+
+def iface_ipv4(iface):
+    try:
+        out = subprocess.run(["ip", "-4", "-o", "addr", "show", "dev", iface], capture_output=True, text=True).stdout
+    except OSError:
+        return None
+    m = re.search(r"\binet (\d+\.\d+\.\d+\.\d+)/", out)
+    return m.group(1) if m else None
+
+
+def host_public_ipv4():
+    """A public IPv4 assigned to one of this machine's interfaces (what llarpd's relay mode
+    looks for), or None when the machine only has private addresses (behind NAT)."""
+    try:
+        out = subprocess.run(["ip", "-4", "-o", "addr", "show"], capture_output=True, text=True).stdout
+    except OSError:
+        return None
+    return next((a for a in re.findall(r"\binet (\d+\.\d+\.\d+\.\d+)/", out) if is_public_ipv4(a)), None)
+
+
+def detect_public_ip():
+    """Ask an outside service which IP our traffic comes from."""
+    try:
+        req = urllib.request.Request("https://api.ipify.org", headers={"User-Agent": "llarp-gui"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            ip = r.read(64).decode().strip()
+    except Exception as e:  # noqa: BLE001
+        raise LlarpError(f"could not detect the public IP: {e}") from e
+    if not is_public_ipv4(ip):
+        raise LlarpError(f"got an unexpected answer while detecting the public IP: {ip!r}")
+    return ip
+
+
+# fatal startup errors llarpd logs before exiting
+STARTUP_FAILED_RE = re.compile(r"failed to start up llarpd: (.+)")
+
+
 def ip_forward_enabled():
     try:
         return Path("/proc/sys/net/ipv4/ip_forward").read_text().strip() == "1"
@@ -296,6 +344,17 @@ class Controller:
             raise LlarpError(f"unknown setting: {key}")
         if key == "log_level" and value not in LOG_LEVELS:
             raise LlarpError(f"log_level must be one of: {', '.join(LOG_LEVELS)}")
+        if key == "public_ip":
+            value = (value or "").strip()
+            if value and not is_public_ipv4(value):
+                raise LlarpError(f"{value} is not a public IPv4 address")
+        if key == "public_port":
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                raise LlarpError("public_port must be a number") from None
+            if not 1 <= value <= 65535:
+                raise LlarpError("public_port must be between 1 and 65535")
         if key == "router_mode":
             self.set_router_mode(bool(value))
             return
@@ -412,6 +471,8 @@ class Controller:
         except OSError:
             override = ""
         relevant = {k: self.settings.get(k) for k in ("llarpd", "config", "router_mode", "log_level", "exit_node")}
+        if self.settings.get("router_mode"):
+            relevant["public"] = [self.settings.get("public_ip"), self.settings.get("public_port")]
         relevant["vpn"] = [self.settings.get("use_exit"), self.exit_auth(self.settings.get("use_exit"))]
         relevant["bootstraps"] = self.enabled_bootstrap_files()
         relevant["override"] = override
@@ -445,7 +506,39 @@ class Controller:
             return f"llarpd binary not found or not executable: {s['llarpd']}"
         if not Path(s["config"]).exists():
             return f"config file not found: {s['config']} (generate one with: llarpctl generate-config)"
+        if (
+            s.get("router_mode")
+            and not s.get("public_ip")
+            and not host_public_ipv4()
+            and not self._main_config_sets("bind", "inbound")
+            and not os.environ.get("LLARP_BIND_UDP_INBOUND")
+        ):
+            return (
+                "Router mode needs a public IP address, but this machine only has private ones "
+                "(it's behind a router/NAT). Either set your public IP under Settings → Public IP "
+                "(llarpctl set public_ip auto) and forward UDP port "
+                f"{s.get('public_port') or 1090} on your router to this machine, or run router mode on a VPS."
+            )
         return None
+
+    def exit_reason(self):
+        """Why the last run of llarpd failed to start, if it logged a reason."""
+        try:
+            text = LOG_FILE.read_text(errors="replace")
+        except OSError:
+            return None
+        m = None
+        for m in STARTUP_FAILED_RE.finditer(text):
+            pass
+        if not m:
+            return None
+        reason = m.group(1).strip()
+        if "no inbound links configured" in reason:
+            reason += (
+                " - router mode needs a public IP. Behind a home router, set it under "
+                "Settings → Public IP and forward the UDP port to this machine."
+            )
+        return reason
 
     def _command_and_env(self):
         s = self.settings
@@ -462,6 +555,13 @@ class Controller:
             env.pop("LLARP_BOOTSTRAP_FILEPATHS", None)
         if s.get("log_level"):
             env["LLARP_LOG_LEVEL"] = s["log_level"]
+        if s.get("router_mode") and s.get("public_ip"):
+            # behind NAT: listen on our LAN address and advertise the forwarded public one
+            port = int(s.get("public_port") or 1090)
+            lan_ip = iface_ipv4(default_route_iface() or "")
+            env["LLARP_BIND_UDP_INBOUND"] = f"{lan_ip}:{port}" if lan_ip else f":{port}"
+            env["LLARP_PUBLIC_IP"] = s["public_ip"]
+            env["LLARP_PUBLIC_PORT"] = str(port)
         exit_node = s.get("exit_node", False)
         env["LLARP_BECOME_EXIT_NODE"] = "1" if exit_node else "0"
         if exit_node:
@@ -490,6 +590,9 @@ class Controller:
         self.note("bootstraps: " + (", ".join(files) if files else "none (llarpd uses its config / built-in fallbacks)"))
         if self.settings.get("exit_node"):
             self.note("exit node mode on")
+        if env.get("LLARP_PUBLIC_IP"):
+            self.note(f"router behind NAT: listening on {env['LLARP_BIND_UDP_INBOUND']}, "
+                      f"advertising {env['LLARP_PUBLIC_IP']}:{env['LLARP_PUBLIC_PORT']}")
         if self.settings.get("use_exit"):
             self.note(f"VPN: routing internet traffic through {self.settings['use_exit']}")
 
