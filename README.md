@@ -28,6 +28,19 @@ sudo ./install.sh     # system-wide: /opt/llarp-control, /usr/local/bin/llarpctl
 Start the GUI with `python3 ~/.local/share/llarp-control/llarp_gui.py`
 (or `/opt/llarp-control/llarp_gui.py` for a system-wide install).
 
+## AppImage
+
+`LLARP_Control-*-x86_64.AppImage` is a single file with the GUI and llarpctl. It uses the
+system's Python 3 and GTK 3, and llarpd still has to be installed separately.
+
+```sh
+chmod +x LLARP_Control-*-x86_64.AppImage
+./LLARP_Control-*-x86_64.AppImage              # the GUI
+./LLARP_Control-*-x86_64.AppImage ctl status   # llarpctl
+```
+
+Build it with `./make-appimage.sh` (needs [appimagetool](https://github.com/AppImage/appimagetool/releases)).
+
 ## VPS bundle (builds llarpd too)
 
 The easiest way: download the prebuilt bundle from the
