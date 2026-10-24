@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=LLARP Control
+Comment=Turn llarpd on and off, manage bootstraps, exit node and .loki VPN
+Exec=llarp-control
+Icon=llarp-control
+Terminal=false
+Categories=Network;
+Keywords=llarp;lokinet;loki;vpn;

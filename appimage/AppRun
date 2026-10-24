@@ -1,0 +1,29 @@
+#!/bin/sh
+# LLARP Control AppImage entry point.
+#   LLARP_Control.AppImage            -> the GUI
+#   LLARP_Control.AppImage ctl ARGS   -> llarpctl ARGS (also when symlinked as "llarpctl")
+HERE=$(dirname "$(readlink -f "$0")")
+APP=$HERE/usr/share/llarp-control
+export PYTHONDONTWRITEBYTECODE=1
+
+case "$(basename "${ARGV0:-$0}")" in
+    llarpctl*) exec python3 "$APP/llarpctl" "$@" ;;
+esac
+case "$1" in
+    ctl|llarpctl) shift; exec python3 "$APP/llarpctl" "$@" ;;
+esac
+
+if ! python3 -c 'import gi; gi.require_version("Gtk", "3.0"); from gi.repository import Gtk' 2>/dev/null; then
+    msg="LLARP Control needs Python 3 with GTK 3 (PyGObject).
+Debian/Ubuntu: sudo apt install python3-gi gir1.2-gtk-3.0
+Fedora: sudo dnf install python3-gobject gtk3
+Arch: sudo pacman -S python-gobject gtk3"
+    echo "$msg" >&2
+    if command -v zenity >/dev/null 2>&1; then
+        zenity --error --title="LLARP Control" --text="$msg" 2>/dev/null
+    elif command -v notify-send >/dev/null 2>&1; then
+        notify-send "LLARP Control" "$msg"
+    fi
+    exit 1
+fi
+exec python3 "$APP/llarp_gui.py" "$@"

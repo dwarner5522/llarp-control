@@ -356,6 +356,9 @@ def cmd_autostart(ctl, args):
         return
 
     script = Path(__file__).resolve()
+    # inside an AppImage our files live on a temporary mount; point systemd at the AppImage
+    appimage = os.environ.get("APPIMAGE")
+    exec_start = f"{appimage} ctl" if appimage else f"{sys.executable} {script}"
     env_lines = f"Environment=XDG_CONFIG_HOME={core.CONFIG_DIR.parent}\n"
     unit = (
         "[Unit]\n"
@@ -365,7 +368,7 @@ def cmd_autostart(ctl, args):
         "[Service]\n"
         "Type=simple\n"
         f"{env_lines}"
-        f"ExecStart={sys.executable} {script} start --foreground\n"
+        f"ExecStart={exec_start} start --foreground\n"
         "KillMode=mixed\n"
         "Restart=on-failure\n"
         "RestartSec=10\n\n"
