@@ -30,7 +30,14 @@ Start the GUI with `python3 ~/.local/share/llarp-control/llarp_gui.py`
 
 ## VPS bundle (builds llarpd too)
 
-`make-bundle.sh` packs the llarpd source (with submodules), llarpctl and a one-shot
+The easiest way: download the prebuilt bundle from the
+[latest release](https://github.com/dwarner5522/llarp-control/releases/latest) straight onto the VPS:
+
+```sh
+wget https://github.com/dwarner5522/llarp-control/releases/latest/download/llarp-control-bundle.tar.gz
+```
+
+To make your own bundle instead, `make-bundle.sh` packs the llarpd source (with submodules), llarpctl and a one-shot
 installer into `llarp-control-bundle.tar.gz`. It expects an llarp checkout at `../llarp`,
 or pass its path:
 
