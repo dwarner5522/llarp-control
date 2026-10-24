@@ -214,6 +214,46 @@ def fail(reason):
     log(f"llarpd not running: {reason} (retrying in {delay}s)")
 
 
+MILESTONES = (
+    ("session with router", "connected to the LLARP network"),
+    ("is built, took", "first path built; the node is reachable"),
+    ("IntroSet publish confirmed", "address published; other LLARP clients can find it"),
+)
+echo = {"ino": None, "pos": 0, "seen": set()}
+
+
+def echo_log():
+    """Copy the important parts of llarpd's log to our stdout, so Umbrel's log viewer shows them:
+    control notes, errors, and the first time each milestone happens in a run."""
+    try:
+        st = core.LOG_FILE.stat()
+    except OSError:
+        return
+    if echo["ino"] is None:
+        echo.update(ino=st.st_ino, pos=st.st_size)  # a log from before we started: already shown
+    elif st.st_ino != echo["ino"]:
+        echo.update(ino=st.st_ino, pos=0, seen=set())  # rotated: llarpd was restarted
+    elif st.st_size < echo["pos"]:
+        echo["pos"] = st.st_size  # trimmed by trim_log; what's left was shown already
+    with open(core.LOG_FILE, "rb") as f:
+        f.seek(echo["pos"])
+        chunk = f.read(1 << 20)
+    cut = chunk.rfind(b"\n") + 1
+    echo["pos"] += cut
+    for line in chunk[:cut].decode(errors="replace").splitlines():
+        if line.startswith("[ctl"):
+            log("llarpd: " + line.split("] ", 1)[-1])
+            if "starting:" in line:
+                echo["seen"] = set()
+        elif "[error]" in line or "[critical]" in line:
+            log("llarpd: " + line[line.find("[error]") if "[error]" in line else line.find("[critical]"):][:300])
+        else:
+            for needle, text in MILESTONES:
+                if needle in line and needle not in echo["seen"]:
+                    echo["seen"].add(needle)
+                    log(text)
+
+
 def trim_log():
     """llarpd appends to its log forever; keep the newest part. Its file descriptor is in
     append mode, so its next write lands at the new end of the file."""
@@ -248,6 +288,7 @@ def watchdog():
                     ctl.request_stop()
                 was_running = running
                 firewall_sync()
+                echo_log()
                 trim_log()
             except Exception as e:  # noqa: BLE001 - keep the watchdog alive
                 log(f"watchdog error: {e!r}")
