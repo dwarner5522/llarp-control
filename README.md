@@ -71,6 +71,16 @@ That installs build dependencies (apt, dnf or pacman), builds and installs llarp
 installs llarpctl, generates a config, adds the opennet bootstrap and starts llarpd.
 See `./install.sh --help` and `bundle/README.txt`.
 
+## Umbrel app
+
+`umbrel/` holds the LLARP app for Umbrel (umbrelOS 1.x and Umbrel 0.5.4): an image with llarpd and a
+web control page. It runs as a router node (`.snode`) by default; a switch turns it into a client node
+whose `.loki` address leads to the Umbrel login page. Install it from the
+[dwarner5522 app store](https://github.com/dwarner5522/umbrel-app-store) (`dwarner-llarp`).
+
+The image `ghcr.io/dwarner5522/llarp-umbrel` is built for amd64 and arm64 by
+`.github/workflows/umbrel-image.yml` when a tag like `umbrel-v1.0.0` is pushed.
+
 ## Command line
 
 ```sh

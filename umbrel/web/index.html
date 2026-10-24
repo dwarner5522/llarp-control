@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLARP</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<style>
+  :root {
+    --bg: #191919; --surface: #202120; --raised: #2a2c2a; --border: #393d39; --well: #111211;
+    --text: #e4e8e2; --dim: #8e968c; --lime: #6fb34c; --bright: #86cf5f; --green: #128741; --teal: #006261;
+    --warn: #e0b341; --bad: #e0614f;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 20px 16px 40px; }
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; flex-wrap: wrap; }
+  header img { width: 40px; height: 40px; }
+  .brand { color: var(--lime); font-weight: 800; letter-spacing: 3px; font-size: 22px; }
+  .pill { padding: 3px 10px; border-radius: 99px; font-size: 13px; background: var(--raised); color: var(--dim); }
+  .pill.on { background: rgba(111,179,76,.15); color: var(--bright); }
+  .pill.bad { background: rgba(224,97,79,.15); color: var(--bad); }
+  .pill.wait { background: rgba(224,179,65,.13); color: var(--warn); }
+  .spacer { flex: 1; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 14px; }
+  .card h2 { margin: 0 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: 1.5px; color: var(--dim); font-weight: 600; }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .grow { flex: 1; min-width: 0; }
+  .muted { color: var(--dim); font-size: 13.5px; }
+  .addr { font-family: ui-monospace, "DejaVu Sans Mono", monospace; font-size: 14.5px; color: var(--bright); word-break: break-all; }
+  button, input { font: inherit; }
+  button { background: var(--raised); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 7px 14px; cursor: pointer; }
+  button:hover { border-color: var(--lime); }
+  button.primary { background: linear-gradient(90deg, var(--lime), var(--green)); color: #0b130a; border: none; font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  input[type=text], input[type=number] { background: var(--well); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; min-width: 0; }
+  input:focus { outline: none; border-color: var(--lime); }
+  /* switch */
+  .switch { position: relative; width: 50px; height: 28px; flex: none; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch span { position: absolute; inset: 0; background: var(--raised); border: 1px solid var(--border); border-radius: 99px; transition: .2s; cursor: pointer; }
+  .switch span::before { content: ""; position: absolute; width: 20px; height: 20px; left: 3px; top: 3px; background: var(--dim); border-radius: 50%; transition: .2s; }
+  .switch input:checked + span { background: linear-gradient(90deg, var(--lime), var(--teal)); border-color: transparent; }
+  .switch input:checked + span::before { transform: translateX(22px); background: #fff; }
+  .switch input:focus-visible + span { outline: 2px solid var(--bright); outline-offset: 2px; }
+  .mode { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 14px; }
+  .mode .side { padding: 10px 12px; border-radius: 10px; border: 1px solid transparent; }
+  .mode .side.active { border-color: var(--lime); background: rgba(111,179,76,.07); }
+  .mode .side b { display: block; }
+  .mode .side.right { text-align: right; }
+  .banner { border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; }
+  .banner.warn { background: rgba(224,179,65,.10); border: 1px solid rgba(224,179,65,.5); color: #f1d58a; }
+  .banner.bad { background: rgba(224,97,79,.10); border: 1px solid rgba(224,97,79,.5); color: #f3a89c; }
+  .banner.info { background: rgba(111,179,76,.08); border: 1px solid rgba(111,179,76,.4); }
+  .banner .addr { color: inherit; font-weight: 600; }
+  ul.bs { list-style: none; padding: 0; margin: 0 0 12px; }
+  ul.bs li { display: flex; gap: 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--border); }
+  ul.bs li:last-child { border-bottom: none; }
+  pre.log { background: var(--well); color: var(--lime); border-radius: 8px; padding: 10px; height: 320px; overflow: auto; font-size: 12px; margin: 0; white-space: pre-wrap; word-break: break-all; }
+  details summary { cursor: pointer; color: var(--dim); }
+  .hidden { display: none !important; }
+  #toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: var(--raised); border: 1px solid var(--bad); color: var(--text); padding: 10px 16px; border-radius: 10px; max-width: calc(100% - 32px); }
+  @media (max-width: 560px) {
+    .mode { grid-template-columns: 1fr; text-align: center; }
+    .mode .side.right { text-align: center; }
+    .mode .switch { margin: 0 auto; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <img src="icon.svg" alt="">
+    <span class="brand">LLARP</span>
+    <span id="state" class="pill">…</span>
+    <span class="spacer"></span>
+    <span class="muted">On</span>
+    <label class="switch" title="Turn llarpd on or off"><input type="checkbox" id="power"><span></span></label>
+    <button id="restart">Restart</button>
+  </header>
+
+  <div id="clientWarning" class="banner warn hidden">
+    <b>Warning:</b> Your Umbrel is now accessible via the LLARP network at the following LLARP address:
+    <span class="addr" id="warnAddr"></span>
+    <div class="muted" style="color:inherit;opacity:.85;margin-top:6px" id="warnDetail"></div>
+  </div>
+  <div id="error" class="banner bad hidden"></div>
+  <div id="notice" class="banner info hidden"></div>
+
+  <section class="card">
+    <h2>Node type</h2>
+    <div class="mode">
+      <div class="side" id="sideRouter"><b>Router node</b><span class="muted">Relays traffic for the LLARP network · <code>.snode</code> address</span></div>
+      <label class="switch" title="Switch between router and client node"><input type="checkbox" id="mode"><span></span></label>
+      <div class="side right" id="sideClient"><b>Client node</b><span class="muted">Your Umbrel login page at a <code>.loki</code> address</span></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Address</h2>
+    <div class="row">
+      <span class="addr grow" id="address">…</span>
+      <button id="copy">Copy</button>
+    </div>
+    <div class="muted" id="addressNote"></div>
+  </section>
+
+  <section class="card" id="routerCard">
+    <h2>Reachability</h2>
+    <p class="muted" style="margin-top:0" id="routerHelp"></p>
+    <div class="row">
+      <label class="muted" for="pubip">Public IP</label>
+      <input type="text" id="pubip" class="grow" placeholder="leave empty if this machine has a public IP" inputmode="decimal">
+      <label class="muted" for="pubport">UDP port</label>
+      <input type="number" id="pubport" min="1" max="65535" style="width:100px">
+      <button id="detect">Detect</button>
+      <button id="savePublic" class="primary">Save</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Bootstraps</h2>
+    <ul class="bs" id="bootstraps"></ul>
+    <div class="row">
+      <input type="text" id="bsUrl" class="grow" placeholder="https://… URL of a .signed bootstrap file">
+      <button id="bsAddUrl">Add URL</button>
+      <button id="bsUpload">Upload file…</button>
+      <input type="file" id="bsFile" accept=".signed" class="hidden">
+    </div>
+  </section>
+
+  <section class="card">
+    <details id="logBox">
+      <summary>Log</summary>
+      <pre class="log" id="log"></pre>
+    </details>
+  </section>
+
+  <p class="muted" id="footer"></p>
+</main>
+<div id="toast" class="hidden"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let status = null, busy = false, pubDirty = false;
+
+async function call(path, body) {
+  const opts = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  const res = await fetch(path.replace(/^\//, ""), opts);
+  let data = {};
+  try { data = await res.json(); } catch (_) { throw new Error(res.status === 503 ? "LLARP is starting up…" : "Unexpected reply (" + res.status + ")"); }
+  if (!res.ok) throw new Error(data.error || "Request failed (" + res.status + ")");
+  return data;
+}
+
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.classList.remove("hidden");
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => t.classList.add("hidden"), 6000);
+}
+
+async function act(path, body) {
+  if (busy) return;
+  busy = true; document.body.style.cursor = "progress";
+  try { render(await call(path, body)); } catch (e) { toast(e.message); refresh(); }
+  finally { busy = false; document.body.style.cursor = ""; }
+}
+
+function render(s) {
+  status = s;
+  const client = s.mode === "client";
+  const st = $("state");
+  if (!s.enabled) { st.textContent = "Off"; st.className = "pill"; }
+  else if (!s.running) { st.textContent = s.error ? "Problem" : "Starting…"; st.className = "pill " + (s.error ? "bad" : "wait"); }
+  else if (client && s.connected === false) { st.textContent = "Connecting to the network…"; st.className = "pill wait"; }
+  else { st.textContent = "Running" + (s.uptime ? " · " + s.uptime : ""); st.className = "pill on"; }
+  $("power").checked = s.enabled;
+  $("mode").checked = client;
+  $("sideRouter").classList.toggle("active", !client);
+  $("sideClient").classList.toggle("active", client);
+
+  $("address").textContent = s.address || "—";
+  $("copy").disabled = !s.address;
+  $("addressNote").textContent = s.address
+    ? (client ? "Other LLARP clients can open http://" + s.address + " to reach your Umbrel's login page." : "Your router's identity on the LLARP network.")
+    : (s.address_kind || "");
+
+  $("clientWarning").classList.toggle("hidden", !client);
+  $("warnAddr").textContent = s.address || "(created when LLARP starts)";
+  const details = [];
+  if (!s.running) details.push("LLARP is not running right now, so nothing is reachable until it starts.");
+  if (s.firewall && s.firewall !== "on") details.push("The firewall could not be set up (" + s.firewall + "), so other ports of your Umbrel may be reachable too.");
+  else if (s.firewall === "on") details.push("Only port " + s.umbrel_web_port + " (the login page) is reachable; everything else arriving over LLARP is blocked.");
+  if (s.umbrel_web === false) details.push("Nothing answers on port " + s.umbrel_web_port + " of this Umbrel, so visitors will see an error.");
+  $("warnDetail").textContent = details.join(" ");
+
+  const err = s.enabled && !s.running && s.error ? s.error + (s.retry_in ? " (trying again in " + s.retry_in + "s)" : "") : "";
+  $("error").textContent = err; $("error").classList.toggle("hidden", !err);
+  $("notice").textContent = s.notice || ""; $("notice").classList.toggle("hidden", !s.notice);
+
+  $("routerCard").classList.toggle("hidden", client);
+  if (s.host_public_ip) {
+    $("routerHelp").textContent = "This machine has the public IP " + s.host_public_ip + ", so other relays can reach it directly on UDP port " + s.public_port + ".";
+  } else {
+    $("routerHelp").innerHTML = "";
+    $("routerHelp").append(
+      "A router node must be reachable from the internet. Your Umbrel is behind your home router, so enter your public IP below and ",
+      Object.assign(document.createElement("b"), { textContent: "forward UDP port " + s.public_port + " on your home router to " + (s.lan_ip || "this Umbrel") }),
+      ". If you can't forward ports, use client mode instead.");
+  }
+  if (!pubDirty) { $("pubip").value = s.public_ip || ""; $("pubport").value = s.public_port; }
+
+  const ul = $("bootstraps"); ul.innerHTML = "";
+  for (const b of s.bootstraps) {
+    const li = document.createElement("li");
+    const sw = document.createElement("label"); sw.className = "switch";
+    const cb = Object.assign(document.createElement("input"), { type: "checkbox", checked: b.enabled });
+    cb.onchange = () => act("/api/bootstrap/enable", { name: b.name, enabled: cb.checked });
+    sw.append(cb, document.createElement("span"));
+    const txt = document.createElement("div"); txt.className = "grow";
+    txt.append(Object.assign(document.createElement("div"), { textContent: b.name }),
+               Object.assign(document.createElement("div"), { className: "muted", textContent: b.summary }));
+    const rm = Object.assign(document.createElement("button"), { textContent: "Remove" });
+    rm.onclick = () => { if (confirm("Remove bootstrap " + b.name + "?")) act("/api/bootstrap/remove", { name: b.name }); };
+    li.append(sw, txt, rm); ul.append(li);
+  }
+  if (!s.bootstraps.length) ul.append(Object.assign(document.createElement("li"), { className: "muted", textContent: "No bootstraps: add one so LLARP can find the network." }));
+  $("footer").textContent = s.version + (s.lan_ip ? " · LAN " + s.lan_ip : "");
+}
+
+async function refresh() {
+  try { render(await call("/api/status")); }
+  catch (e) { $("state").textContent = e.message; $("state").className = "pill wait"; }
+  if ($("logBox").open) {
+    try {
+      const pre = $("log"), atEnd = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
+      pre.textContent = (await call("/api/log")).log;
+      if (atEnd) pre.scrollTop = pre.scrollHeight;
+    } catch (_) {}
+  }
+}
+
+$("power").onchange = (e) => act("/api/power", { on: e.target.checked });
+$("restart").onclick = () => act("/api/restart", {});
+$("mode").onchange = (e) => {
+  const client = e.target.checked;
+  if (client && !confirm("Switch to client mode?\n\nYour Umbrel's login page will be reachable by anyone on the LLARP network at this node's .loki address. Everything else arriving over LLARP is blocked.")) {
+    e.target.checked = false; return;
+  }
+  act("/api/mode", { mode: client ? "client" : "router" });
+};
+$("copy").onclick = async () => {
+  try { await navigator.clipboard.writeText(status.address); $("copy").textContent = "Copied"; }
+  catch (_) { getSelection().selectAllChildren($("address")); $("copy").textContent = "Press Ctrl+C"; }
+  setTimeout(() => ($("copy").textContent = "Copy"), 1500);
+};
+for (const id of ["pubip", "pubport"]) $(id).oninput = () => (pubDirty = true);
+$("savePublic").onclick = async () => {
+  await act("/api/public", { ip: $("pubip").value.trim(), port: Number($("pubport").value) || 1090 });
+  pubDirty = false; refresh();
+};
+$("detect").onclick = async () => { pubDirty = false; await act("/api/public", { ip: "auto" }); };
+$("bsAddUrl").onclick = async () => {
+  const url = $("bsUrl").value.trim(); if (!url) return;
+  await act("/api/bootstrap/add", { url }); $("bsUrl").value = "";
+};
+$("bsUpload").onclick = () => $("bsFile").click();
+$("bsFile").onchange = async () => {
+  const f = $("bsFile").files[0]; if (!f) return;
+  const bytes = new Uint8Array(await f.arrayBuffer());
+  let bin = ""; for (const b of bytes) bin += String.fromCharCode(b);
+  await act("/api/bootstrap/add", { name: f.name, data: btoa(bin) });
+  $("bsFile").value = "";
+};
+$("logBox").ontoggle = refresh;
+
+refresh();
+setInterval(() => { if (!busy) refresh(); }, 2500);
+</script>
+</body>
+</html>
