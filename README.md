@@ -119,4 +119,7 @@ llarpctl --help
   without any visible sign. `llarpctl status` and the GUI flag this after 10 minutes. Under
   systemd (`llarpctl autostart on`) and on Umbrel, a watchdog restarts llarpd automatically.
   An exit node should run with autostart on.
+- The same watchdog reconnects the VPN. llarpd can keep a dead session to an exit (for example
+  after the exit restarted). If no traffic gets through for 3 minutes, llarpd is restarted for a
+  fresh session, waiting twice as long after each try that doesn't help (up to 30 minutes).
 - Settings, state and the llarpd log live in `~/.config/llarp-gui/`.

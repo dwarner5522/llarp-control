@@ -61,6 +61,10 @@ STUCK_AFTER = 600  # seconds of unbroken failures before it counts as stuck
 STUCK_GAP = 60  # a break longer than this ends the streak
 HEALTH_TAIL_BYTES = 2 << 20  # how much of the end of the log to look at
 WATCHDOG_EVERY = 60  # seconds between checks in run_foreground
+# VPN reconnect: restart llarpd when no traffic gets through the exit for this long, doubling
+# the wait after each try that doesn't help
+VPN_RECONNECT_AFTER = 180  # seconds
+VPN_RECONNECT_MAX = 1800  # seconds
 LOG_TIME_RE = re.compile(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)")
 
 # conf.d override written by this app (llarpd loads <data-dir>/conf.d/*.ini)
@@ -757,6 +761,7 @@ class Controller:
         signal.signal(signal.SIGTERM, forward)
         signal.signal(signal.SIGINT, forward)
         next_check = time.time() + WATCHDOG_EVERY
+        vpn_watch = {"bad_since": None, "reconnects": 0}
         while True:
             try:
                 code = current["proc"].wait(timeout=5)
@@ -764,11 +769,16 @@ class Controller:
                 if time.time() < next_check or current["stopping"]:
                     continue
                 next_check = time.time() + WATCHDOG_EVERY
+                reason = None
                 health = self.path_health()
-                if not health["stuck"]:
+                if health["stuck"]:
+                    reason = (f"llarpd has failed to build paths for {int(health['for']) // 60} min "
+                              "(no relays to use as first hop)")
+                else:
+                    reason = self.vpn_needs_reconnect(vpn_watch)
+                if not reason:
                     continue
-                self.note(f"watchdog: llarpd has failed to build paths for {int(health['for']) // 60} min "
-                          "(no relays to use as first hop); restarting it")
+                self.note(f"watchdog: {reason}; restarting it")
                 current["proc"].terminate()
                 try:
                     current["proc"].wait(timeout=STOP_TIMEOUT)
@@ -784,6 +794,34 @@ class Controller:
         code = current["proc"].returncode
         self.note(f"llarpd exited with code {code}")
         return code
+
+    def vpn_needs_reconnect(self, watch, now=None):
+        """Watchdog part for the VPN: llarpd can keep a dead session to an exit (e.g. after the
+        exit restarted) and never set up a new one. Returns a reason to restart llarpd, or None.
+
+        `watch` ({"bad_since", "reconnects"}) carries state between calls. Restarts after
+        VPN_RECONNECT_AFTER seconds without traffic getting through, then waits twice as long
+        after each further try (up to VPN_RECONNECT_MAX); a working VPN resets that."""
+        now = time.time() if now is None else now
+        self.reload_if_changed()  # the VPN may have been turned off or changed meanwhile
+        use_exit = self.settings.get("use_exit")
+        state = self.vpn_status()["state"] if use_exit else "off"
+        if state == "on" or state == "off":
+            watch.update(bad_since=None, reconnects=0)
+            return None
+        if state not in ("connecting", "trouble"):  # stopped / pending (restart to apply)
+            watch["bad_since"] = None
+            return None
+        if watch["bad_since"] is None:
+            watch["bad_since"] = now
+            return None
+        wait = min(VPN_RECONNECT_MAX, VPN_RECONNECT_AFTER * 2 ** watch["reconnects"])
+        if now - watch["bad_since"] < wait:
+            return None
+        minutes = int(now - watch["bad_since"]) // 60
+        watch["bad_since"] = None
+        watch["reconnects"] += 1
+        return f"no traffic has got through {use_exit} for {minutes} min (reconnect #{watch['reconnects']})"
 
     def path_health(self):
         """{"stuck", "for"}: llarpd's own endpoint has failed to build paths ("no first hop
