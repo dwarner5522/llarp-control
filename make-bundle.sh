@@ -15,16 +15,24 @@ trap 'rm -rf "$WORK"' EXIT
 STAGE=$WORK/$NAME
 mkdir -p "$STAGE"
 
-echo "==> cloning $REPO (with submodules)"
-git clone -q "$REPO" "$WORK/clone"
-git -C "$WORK/clone" checkout -q "$(git -C "$REPO" rev-parse HEAD)"
-git -C "$WORK/clone" submodule update -q --init --recursive
 TAG=$(git -C "$REPO" rev-parse --short=9 HEAD)
-if [ -n "$(git -C "$REPO" status --porcelain --untracked-files=no)" ]; then
-    echo "warning: $REPO has uncommitted changes; the bundle uses the committed version $TAG" >&2
-fi
 mkdir -p "$STAGE/llarp"
-tar -C "$WORK/clone" --exclude=.git --exclude='./build*' -cf - . | tar -C "$STAGE/llarp" -xf -
+# fast path: a clean checkout whose submodules are all at their recorded commits is used as is
+# (tracked files only), so nothing has to be downloaded again
+if [ -z "$(git -C "$REPO" status --porcelain --untracked-files=no --ignore-submodules=none)" ] \
+   && ! git -C "$REPO" submodule status --recursive 2>/dev/null | grep -q '^[-+U]'; then
+    echo "==> copying $REPO (clean, submodules checked out)"
+    git -C "$REPO" ls-files -z --recurse-submodules | tar -C "$REPO" --null -T - -cf - | tar -C "$STAGE/llarp" -xf -
+else
+    echo "==> cloning $REPO (with submodules)"
+    git clone -q "$REPO" "$WORK/clone"
+    git -C "$WORK/clone" checkout -q "$(git -C "$REPO" rev-parse HEAD)"
+    git -C "$WORK/clone" submodule update -q --init --recursive
+    if [ -n "$(git -C "$REPO" status --porcelain --untracked-files=no)" ]; then
+        echo "warning: $REPO has uncommitted changes; the bundle uses the committed version $TAG" >&2
+    fi
+    tar -C "$WORK/clone" --exclude=.git --exclude='./build*' -cf - . | tar -C "$STAGE/llarp" -xf -
+fi
 echo "$TAG" > "$STAGE/VERSION"
 
 echo "==> adding llarpctl"
