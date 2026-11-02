@@ -75,19 +75,23 @@ if [ $SKIP_DEPS = 0 ]; then
     if command -v apt-get >/dev/null; then
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -q
+        # geoip-database: llarpd is built with GeoIP and crashes choosing path hops without GeoIP.dat
         apt-get install -y -q build-essential cmake pkg-config git \
-            libuv1-dev libsodium-dev libsystemd-dev libgeoip-dev libssl-dev \
+            libuv1-dev libsodium-dev libsystemd-dev libgeoip-dev geoip-database libssl-dev \
             libcap2-bin iproute2 iptables python3 procps
     elif command -v dnf >/dev/null; then
         dnf install -y gcc-c++ make cmake pkgconf-pkg-config git \
-            libuv-devel libsodium-devel systemd-devel GeoIP-devel openssl-devel \
+            libuv-devel libsodium-devel systemd-devel GeoIP-devel GeoIP-GeoLite-data openssl-devel \
             libcap iproute iptables python3 procps-ng
     elif command -v pacman >/dev/null; then
         pacman -Sy --needed --noconfirm base-devel cmake pkgconf git \
-            libuv libsodium systemd-libs geoip openssl libcap iproute2 iptables python procps-ng
+            libuv libsodium systemd-libs geoip geoip-database openssl libcap iproute2 iptables python procps-ng
     else
         die "unsupported distro (no apt-get, dnf or pacman); install the packages from docs/install.md and rerun with --skip-deps"
     fi
+fi
+if ! ls /usr/share/GeoIP/GeoIP.dat /usr/share/GeoIP/GeoIP.dat.gz >/dev/null 2>&1; then
+    warn "no GeoIP country database in /usr/share/GeoIP; llarpd may crash a few seconds after starting (install your distro's geoip database package)"
 fi
 
 # ---------------------------------------------------------------- 1. build llarpd
