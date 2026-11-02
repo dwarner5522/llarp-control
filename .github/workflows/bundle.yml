@@ -1,0 +1,69 @@
+name: VPS bundle
+
+# Builds llarp-control-bundle.tar.gz (llarpd source with submodules + llarpctl + installer)
+# and publishes it as a release. Release: push a tag like v1.3.0.
+# The llarp commit is the one pinned in umbrel/Dockerfile, so the bundle and the Umbrel image
+# build the same llarpd.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # tags, for the llarp-control version recorded in the bundle
+
+      - name: Check out llarp at the pinned commit
+        run: |
+          commit=$(sed -n 's/^ARG LLARP_COMMIT=\([0-9a-f]\{40\}\)$/\1/p' umbrel/Dockerfile)
+          [ -n "$commit" ] || { echo "LLARP_COMMIT not found in umbrel/Dockerfile" >&2; exit 1; }
+          git clone -q https://github.com/majestrate/llarp.git ../llarp
+          git -C ../llarp checkout -q "$commit"
+          git -C ../llarp submodule update -q --init --recursive
+          echo "llarp $(git -C ../llarp rev-parse --short=9 HEAD)"
+
+      - name: Build the bundle
+        run: ./make-bundle.sh ../llarp "$PWD/llarp-control-bundle.tar.gz"
+
+      - name: Check the bundle
+        run: |
+          mkdir check && tar -C check -xzf llarp-control-bundle.tar.gz
+          b=check/llarp-control-bundle
+          if grep -rlI $'\r' "$b/install.sh" "$b/llarp-control"; then echo "CRLF in the bundle" >&2; exit 1; fi
+          bash -n "$b/install.sh"
+          python3 "$b/llarp-control/llarpctl" --help > /dev/null
+          echo "llarpd $(cat $b/VERSION), llarp-control $(cat $b/llarp-control/VERSION)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: llarp-control-bundle
+          path: llarp-control-bundle.tar.gz
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" llarp-control-bundle.tar.gz \
+            --title "LLARP Control ${GITHUB_REF_NAME#v}" \
+            --notes-file - <<'EOF'
+          VPS bundle: llarpd source, llarpctl and a one-shot installer.
+
+          ```sh
+          wget https://github.com/dwarner5522/llarp-control/releases/latest/download/llarp-control-bundle.tar.gz
+          tar xzf llarp-control-bundle.tar.gz && cd llarp-control-bundle
+          sudo ./install.sh            # or: sudo ./install.sh --autostart --user root
+          ```
+
+          Updating an existing install: unpack the new bundle and run `sudo ./install.sh` again.
+          For an exit node, run llarpd under systemd (`llarpctl autostart on`) so the watchdog can
+          restart it if it gets stuck. See README.txt in the bundle.
+          EOF
