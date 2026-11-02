@@ -517,6 +517,12 @@ class App(Gtk.Window):
             if ctl.changes_pending():
                 text += " · restart to apply changes"
             cls = "on"
+            # a stuck llarpd (can't build paths) looks alive; checked every 30 s (reads the log)
+            if time.time() - getattr(self, "_health_at", 0) > 30:
+                self._health, self._health_at = ctl.path_health(), time.time()
+            if self._health["stuck"]:
+                text += f" · stuck: no paths for {int(self._health['for']) // 60} min, restart it"
+                cls = "err"
         else:
             text, cls = "Stopped", "off"
         self.status_label.set_text(text)

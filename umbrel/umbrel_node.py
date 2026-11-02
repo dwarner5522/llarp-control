@@ -287,6 +287,15 @@ def watchdog():
                 elif not state["enabled"] and running and not ctl.stopping():
                     ctl.request_stop()
                 was_running = running
+                # a llarpd that can't build paths stays "running" but is useless: restart it
+                if running and time.time() - runtime.get("health_at", 0) > core.WATCHDOG_EVERY:
+                    runtime["health_at"] = time.time()
+                    health = ctl.path_health()
+                    if health["stuck"]:
+                        log(f"llarpd has failed to build paths for {int(health['for']) // 60} min; restarting it")
+                        ctl.note("watchdog: llarpd can't build paths (no relays to use as first hop); restarting it")
+                        restart_llarpd()
+                        was_running = ctl.is_running()
                 firewall_sync()
                 echo_log()
                 trim_log()

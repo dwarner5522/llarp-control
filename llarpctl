@@ -19,6 +19,8 @@ import llarp_core as core  # noqa: E402
 from llarp_core import LlarpError  # noqa: E402
 
 SERVICE_NAME = "llarp-control"
+# inside WSL, LLARP Control for Windows restarts llarpd so Windows stays connected to it
+WSL_RESTART_HINT = "apply it by restarting llarpd from LLARP Control (or: llarpctl restart from a Windows Command Prompt)"
 
 USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 
@@ -87,6 +89,11 @@ def cmd_status(ctl, args):
     vpn_color = {"on": green, "trouble": red, "off": dim}.get(vpn["state"], lambda t: color(t, "33"))
     print(f"vpn         {vpn_color(vpn['detail'])}")
     print(f"bootstraps  {st['bootstraps_enabled']} enabled of {len(ctl.settings['bootstraps'])}")
+    if st["health"]["stuck"]:
+        print(red(f"stuck: llarpd has failed to build paths for {int(st['health']['for']) // 60} min "
+                  "(no relays to use as first hop), so nothing can reach it; restart it: llarpctl restart"))
+        if not core.IS_WSL:
+            print(dim("(under systemd - llarpctl autostart on - a watchdog restarts it automatically)"))
     if st["changes_pending"]:
         print(color("settings changed since start; apply with: llarpctl restart", "33"))
     if st["unmanaged_pids"]:
@@ -207,7 +214,9 @@ def cmd_exit(ctl, args):
     for n in ctl.set_exit_node(enable):
         print(n)
     print(f"exit node {on_off(enable)}")
-    if ctl.is_running():
+    if ctl.is_running() and core.IS_WSL:
+        print(WSL_RESTART_HINT)
+    elif ctl.is_running():
         print("restarting llarpd to apply")
         cmd_restart(ctl, argparse.Namespace(wait=20 if enable else 0))
     if enable:
@@ -237,6 +246,14 @@ def cmd_vpn(ctl, args):
         ctl.forget_exit(args.address)
         print(f"forgot {ctl.normalize_exit(args.address)}")
         return
+    if target == "save":
+        if not args.address:
+            raise LlarpError("which exit? llarpctl vpn save ADDRESS [--auth CODE]")
+        entry = ctl.remember_exit(args.address, args.auth)
+        print(f"saved {entry['address']}" + (" (auth code set)" if entry.get("auth") else ""))
+        if ctl.settings.get("use_exit") == entry["address"]:
+            restart_hint(ctl)
+        return
     if target == "off":
         was = ctl.settings.get("use_exit")
         ctl.set_vpn(None)
@@ -249,6 +266,10 @@ def cmd_vpn(ctl, args):
             target = saved[0]["address"]
         address = ctl.set_vpn(target, args.auth)
         print(f"VPN on via {address}")
+    if core.IS_WSL:
+        # LLARP Control for Windows restarts llarpd itself, so Windows gets routed through it too
+        print(WSL_RESTART_HINT if ctl.is_running() else dim("start llarpd to connect: llarpctl start"))
+        return
     was_running = ctl.is_running()
     if was_running:
         print("restarting llarpd to apply")
@@ -327,6 +348,45 @@ def cmd_settings(ctl, args):
     restart_hint(ctl)
 
 
+def cmd_dump(ctl, _args):
+    """Everything a front end shows, as one JSON object (used by LLARP Control for Windows)."""
+    st = ctl.status()
+    state = ctl.state()
+    bootstraps = []
+    for entry in ctl.settings["bootstraps"]:
+        ok, summary, details = core.describe_bootstrap(entry)
+        bootstraps.append({"name": entry["name"], "enabled": entry.get("enabled", True), "ok": ok,
+                           "summary": summary, "details": details})
+    nat = None
+    if st["exit_node"]:
+        target, why = ctl.nat_target()
+        nat = {"target": list(target) if target else None, "why": why,
+               "applied": ctl.nat_applied() == target if target else False}
+    st.update(
+        stopping=ctl.stopping(),
+        started_at=state.get("started_at"),
+        settings={k: ctl.settings.get(k) for k in KEYS},
+        persist=ctl.keyfile_path() is not None,
+        bootstraps=bootstraps,
+        bundled=[p.name for p in ctl.bundled_bootstraps()],
+        exit_reason=None if st["running"] else ctl.exit_reason(),
+        startup_problem=None if st["running"] else ctl.startup_problem(),
+        ip_forward=core.ip_forward_enabled(),
+        nat=nat,
+        data_dir=str(ctl.data_dir()),
+        log_file=str(core.LOG_FILE),
+        wsl=core.IS_WSL,
+        use_exit=ctl.settings.get("use_exit"),
+        exits=[{"address": e["address"], "auth_set": bool(e.get("auth"))} for e in ctl.saved_exits()],
+    )
+    print(json.dumps(st))
+
+
+def cmd_winhost(ctl, args):
+    action = args.action or "info"
+    print(json.dumps(ctl.windows_bridge({"up": True, "down": False}.get(action))))
+
+
 def cmd_generate_config(ctl, _args):
     cfg, output = ctl.generate_config()
     if output.strip():
@@ -335,6 +395,8 @@ def cmd_generate_config(ctl, _args):
 
 
 def cmd_autostart(ctl, args):
+    if core.IS_WSL:
+        raise LlarpError("inside WSL, use LLARP Control for Windows: Settings → Start LLARP when I sign in")
     root = os.geteuid() == 0
     if root:
         unit_path = Path(f"/etc/systemd/system/{SERVICE_NAME}.service")
@@ -444,9 +506,10 @@ def build_parser():
     s = sub.add_parser("vpn", help="route your internet traffic through a .loki exit node",
                        description="llarpctl vpn ADDRESS.loki [--auth CODE]   connect (starts llarpd if needed)\n"
                                    "llarpctl vpn on | off                       reconnect to the last exit / disconnect\n"
-                                   "llarpctl vpn status | list | forget ADDRESS",
+                                   "llarpctl vpn status | list | forget ADDRESS\n"
+                                   "llarpctl vpn save ADDRESS --auth CODE       remember an exit (and its auth code) without connecting",
                        formatter_class=argparse.RawDescriptionHelpFormatter)
-    s.add_argument("target", nargs="?", metavar="ADDRESS|on|off|status|list|forget")
+    s.add_argument("target", nargs="?", metavar="ADDRESS|on|off|status|list|forget|save")
     s.add_argument("address", nargs="?", help=argparse.SUPPRESS)
     s.add_argument("--auth", help="auth code for a private exit (\"\" clears it)")
     s.add_argument("-w", "--wait", type=int, default=30, metavar="SECS", help="wait for the connection (default 30)")
@@ -470,6 +533,13 @@ def build_parser():
     s = sub.add_parser("autostart", help="start llarpd at boot via systemd (on/off)")
     s.add_argument("state", choices=["on", "off"], nargs="?")
     s.set_defaults(func=cmd_autostart)
+
+    s = sub.add_parser("dump", help="everything about llarpd and the settings as JSON (for front ends)")
+    s.set_defaults(func=cmd_dump)
+
+    s = sub.add_parser("winhost", help="WSL only: let the Windows host reach .loki (used by LLARP Control for Windows)")
+    s.add_argument("action", choices=["up", "down", "info"], nargs="?")
+    s.set_defaults(func=cmd_winhost)
     return p
 
 

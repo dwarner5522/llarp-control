@@ -13,6 +13,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import time
 import urllib.parse
@@ -48,6 +49,13 @@ LOG_LEVELS = ("trace", "debug", "info", "warn", "error")
 
 STOP_TIMEOUT = 10  # seconds before SIGKILL
 
+# stuck llarpd: its endpoint keeps failing to build paths ("no first hop candidate")
+STUCK_AFTER = 600  # seconds of unbroken failures before it counts as stuck
+STUCK_GAP = 60  # a break longer than this ends the streak
+HEALTH_TAIL_BYTES = 2 << 20  # how much of the end of the log to look at
+WATCHDOG_EVERY = 60  # seconds between checks in run_foreground
+LOG_TIME_RE = re.compile(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)")
+
 # conf.d override written by this app (llarpd loads <data-dir>/conf.d/*.ini)
 OVERRIDE_NAME = "50-llarp-gui.ini"
 GUI_KEYFILE_NAME = "llarp-gui-address.private"
@@ -68,12 +76,34 @@ EXIT_REACHED_RE = re.compile(r"OBContext:([" + B32Z + r"]{52}\.loki) send intro 
 NO_RELAYS_RE = re.compile(r"no first hop candidate|did not build path, no hops available")
 # the exit answered but we can't read it: almost always mismatched llarpd versions
 UNREADABLE_EXIT_RE = re.compile(r"failed to decrypt message from ([" + B32Z + r"]{52}\.loki)")
+# we reached the exit's introset and sent to it, but it never answered
+SILENT_EXIT_RE = re.compile(r"OBContext:([" + B32Z + r"]{52}\.loki) half open state")
 PATH_BUILT_RE = re.compile(r"\bis built, took\b")
 NO_RELAYS_WINDOW = 20  # seconds
 STARTUP_GRACE = 30  # seconds after start when "no relays yet" is normal
 EXIT_TROUBLE_WINDOW = 90  # seconds an exit error stays relevant
+# proving the exit passes traffic: TCP connects through the tunnel, cached this long
+PROBE_TARGETS = (("1.1.1.1", 443), ("9.9.9.9", 443))
+PROBE_TIMEOUT = 4  # seconds per target
+PROBE_EVERY = 15  # seconds
+EXIT_ANSWER_GRACE = 45  # seconds after start before a silent exit counts as trouble
 IPV4_RANGE_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}/\d{1,2}$")
 IFACE_RE = re.compile(r"^[\w.-]+$")
+WINDOWS_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
+# llarpd's own DNS listener (the default for Linux builds without systemd)
+DEFAULT_DNS_BIND = "127.3.2.1:53"
+
+
+def _detect_wsl():
+    try:
+        return "microsoft" in Path("/proc/sys/kernel/osrelease").read_text().lower()
+    except OSError:
+        return False
+
+
+# Running in the LLARP distro of LLARP Control for Windows: the Windows host reaches .loki
+# through this distro (DNS on our WSL address, the tunnel range routed to us).
+IS_WSL = _detect_wsl()
 
 
 class LlarpError(Exception):
@@ -205,6 +235,41 @@ def half_default_route_dev():
         return None
     m = re.search(r"\bdev (\S+)", out)
     return m.group(1) if m else None
+
+
+RESOLV_CONF = Path("/etc/resolv.conf")
+WSL_CONF = Path("/etc/wsl.conf")
+PUBLIC_RESOLVERS = "# written by LLARP Control: DNS through Windows did not answer\nnameserver 9.9.9.9\nnameserver 1.1.1.1\n"
+
+
+def ensure_wsl_dns():
+    """Inside the LLARP distro: once setup has taken DNS over from WSL (generateResolvConf =
+    false, because Windows' DNS forwarder didn't answer), keep /etc/resolv.conf in place.
+    Returns True if it had to be rewritten."""
+    try:
+        if not re.search(r"^\s*generateResolvConf\s*=\s*false\b", WSL_CONF.read_text(), re.I | re.M):
+            return False
+        if RESOLV_CONF.exists() and RESOLV_CONF.read_text().strip():
+            return False
+        RESOLV_CONF.unlink(missing_ok=True)  # also a dangling symlink
+        RESOLV_CONF.write_text(PUBLIC_RESOLVERS)
+        return True
+    except OSError:
+        return False
+
+
+def wsl_host_ip():
+    """This WSL distro's address on the virtual network the Windows host shares with it."""
+    return iface_ipv4(default_route_iface() or "eth0")
+
+
+def wslpath(path):
+    """C:\\x\\y -> /mnt/c/x/y (inside WSL)."""
+    try:
+        out = subprocess.run(["wslpath", "-u", path], capture_output=True, text=True).stdout.strip()
+    except OSError:
+        out = ""
+    return out or "/mnt/" + path[0].lower() + path[2:].replace("\\", "/")
 
 
 def is_public_ipv4(addr):
@@ -375,7 +440,7 @@ class Controller:
     def _reset_scan(self):
         self._scan.update(
             address=None, range=None, tun=None, exit_trouble=None, no_relays=None, path_built=None,
-            exits_reached=set(), unreadable=None,
+            exits_reached=set(), unreadable=None, silent=None,
         )
 
     def scan_log(self):
@@ -418,6 +483,9 @@ class Controller:
             m = UNREADABLE_EXIT_RE.search(line)
             if m:
                 sc["unreadable"] = (time.time(), m.group(1))
+            m = SILENT_EXIT_RE.search(line)
+            if m:
+                sc["silent"] = (time.time(), m.group(1))
             m = EXIT_REACHED_RE.search(line)
             if m:
                 sc["exits_reached"].add(m.group(1))
@@ -498,6 +566,7 @@ class Controller:
             "vpn": self.vpn_status(),
             "bootstraps_enabled": len(self.enabled_bootstrap_files()),
             "unmanaged_pids": self.unmanaged_pids(),
+            "health": self.path_health() if pid else {"stuck": False, "for": 0},
         }
 
     def startup_problem(self):
@@ -581,6 +650,8 @@ class Controller:
         if problem:
             raise LlarpError(problem)
         self._write_override()
+        if IS_WSL and ensure_wsl_dns():
+            self.note(f"{RESOLV_CONF} was missing; wrote public resolvers (Quad9, Cloudflare)")
         cmd, env, files = self._command_and_env()
 
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -632,18 +703,78 @@ class Controller:
         return proc.pid
 
     def run_foreground(self):
-        """Run llarpd and wait for it (for systemd). Returns its exit code."""
-        proc = self._launch()
+        """Run llarpd and wait for it (for systemd and LLARP Control for Windows). Returns its
+        exit code. Watchdog: a llarpd stuck unable to build paths (see path_health) is
+        restarted, since it otherwise keeps running, and keeps advertising itself, uselessly."""
+        current = {"proc": self._launch(), "stopping": False}
 
         def forward(sig, _frame):
+            current["stopping"] = True
             self._update_state(stop_requested_at=time.time())
-            proc.send_signal(sig)
+            current["proc"].send_signal(sig)
 
         signal.signal(signal.SIGTERM, forward)
         signal.signal(signal.SIGINT, forward)
-        code = proc.wait()
+        next_check = time.time() + WATCHDOG_EVERY
+        while True:
+            try:
+                code = current["proc"].wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                if time.time() < next_check or current["stopping"]:
+                    continue
+                next_check = time.time() + WATCHDOG_EVERY
+                health = self.path_health()
+                if not health["stuck"]:
+                    continue
+                self.note(f"watchdog: llarpd has failed to build paths for {int(health['for']) // 60} min "
+                          "(no relays to use as first hop); restarting it")
+                current["proc"].terminate()
+                try:
+                    current["proc"].wait(timeout=STOP_TIMEOUT)
+                except subprocess.TimeoutExpired:
+                    current["proc"].kill()
+                    current["proc"].wait()
+                if current["stopping"]:
+                    break
+                current["proc"] = self._launch()
+                continue
+            self.note(f"llarpd exited with code {code}")
+            return code
+        code = current["proc"].returncode
         self.note(f"llarpd exited with code {code}")
         return code
+
+    def path_health(self):
+        """{"stuck", "for"}: llarpd's own endpoint has failed to build paths ("no first hop
+        candidate") with no break longer than STUCK_GAP, for at least STUCK_AFTER seconds.
+        A healthy node only logs that during its first seconds. Reads the end of the log only."""
+        result = {"stuck": False, "for": 0}
+        try:
+            size = LOG_FILE.stat().st_size
+            with open(LOG_FILE, "rb") as f:
+                f.seek(max(0, size - HEALTH_TAIL_BYTES))
+                text = f.read().decode(errors="replace")
+        except OSError:
+            return result
+        streak_start = last = None
+        for line in text.splitlines():
+            if "OBContext:" in line or not NO_RELAYS_RE.search(line):
+                continue
+            m = LOG_TIME_RE.match(line)
+            if not m:
+                continue
+            try:
+                t = time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
+            except ValueError:
+                continue
+            if last is None or t - last > STUCK_GAP:
+                streak_start = t
+            last = t
+        if last is None or time.time() - last > STUCK_GAP:
+            return result  # not failing right now
+        result["for"] = last - streak_start
+        result["stuck"] = result["for"] >= STUCK_AFTER
+        return result
 
     def request_stop(self):
         """Send SIGTERM without waiting. Returns False if it wasn't running."""
@@ -762,19 +893,32 @@ class Controller:
         table. On machines with any extra policy-routing rules (Tailscale, other VPNs, docker
         setups...) the local table is looked up on its own before main, so that blackhole
         swallows everything - including llarpd's own traffic to its relays - and the VPN can
-        never connect. Turning it off keeps the normal more-specific routes in charge."""
+        never connect. Turning it off keeps the normal more-specific routes in charge.
+
+        Inside WSL (LLARP Control for Windows) a client also answers DNS on the distro's
+        address, so Windows can resolve .loki names through it."""
         if persist is None:
             persist = self._override_has_keyfile()
-        lines = []
+        network, dns = [], []
         if persist:
-            lines.append(f"keyfile={self.data_dir() / GUI_KEYFILE_NAME}")
+            network.append(f"keyfile={self.data_dir() / GUI_KEYFILE_NAME}")
         if self.settings.get("use_exit") and not self._main_config_sets("network", "blackhole-routes"):
-            lines.append("blackhole-routes=false")
+            network.append("blackhole-routes=false")
+        if IS_WSL and not self.settings.get("router_mode"):
+            ip = wsl_host_ip()
+            if ip:
+                if not self._main_config_sets("dns", "bind"):
+                    dns.append(f"bind={DEFAULT_DNS_BIND}")  # an explicit bind replaces the default
+                dns.append(f"bind={ip}:53")
         override = self.override_file()
         try:
-            if lines:
+            if network or dns:
                 override.parent.mkdir(parents=True, exist_ok=True)
-                text = "# written by LLARP Control; regenerated on every change\n[network]\n" + "\n".join(lines) + "\n"
+                text = "# written by LLARP Control; regenerated on every change\n"
+                if network:
+                    text += "[network]\n" + "\n".join(network) + "\n"
+                if dns:
+                    text += "[dns]\n" + "\n".join(dns) + "\n"
                 if not override.exists() or override.read_text() != text:
                     override.write_text(text)
             else:
@@ -885,6 +1029,27 @@ class Controller:
         self.note(f"VPN on via {entry['address']}")
         return entry["address"]
 
+    def probe_exit(self, use_exit):
+        """True if a TCP connection through the tunnel (to a well-known public address) works.
+        Run at most every PROBE_EVERY seconds per llarpd run; the result is kept in the state
+        file so every front end shares it."""
+        st = self.state()
+        cached = st.get("exit_probe") or {}
+        now = time.time()
+        if (cached.get("exit") == use_exit and cached.get("started_at") == st.get("started_at")
+                and now - cached.get("at", 0) < PROBE_EVERY):
+            return bool(cached.get("ok"))
+        ok = False
+        for target in PROBE_TARGETS:
+            try:
+                socket.create_connection(target, timeout=PROBE_TIMEOUT).close()
+                ok = True
+                break
+            except OSError:
+                continue
+        self._update_state(exit_probe={"exit": use_exit, "started_at": st.get("started_at"), "at": now, "ok": ok})
+        return ok
+
     def vpn_status(self):
         """{"exit", "state": off|stopped|pending|connecting|on|trouble, "detail"}.
 
@@ -911,6 +1076,14 @@ class Controller:
                 "detail": f"{use_exit} answers but its replies can't be read; it probably runs a different "
                 "llarpd version (compare `llarpd --version` on both machines)",
             }
+        silent = sc["silent"]
+        if silent and now - silent[0] < EXIT_TROUBLE_WINDOW and (silent[1] == use_exit or not B32Z_ADDR_RE.match(use_exit)):
+            return {
+                "exit": use_exit,
+                "state": "trouble",
+                "detail": f"{use_exit} doesn't answer: it may be offline, not running as an exit, or need an "
+                "auth code (still retrying)",
+            }
         if sc["no_relays"] and now - sc["no_relays"] < NO_RELAYS_WINDOW and not starting and not recent_path:
             return {
                 "exit": use_exit,
@@ -920,7 +1093,18 @@ class Controller:
         if sc["exit_trouble"] and now - sc["exit_trouble"][0] < EXIT_TROUBLE_WINDOW and not reached:
             return {"exit": use_exit, "state": "trouble", "detail": f"can't reach {use_exit} yet (still retrying)"}
         if routed and reached:
-            return {"exit": use_exit, "state": "on", "detail": f"internet traffic goes through {use_exit}"}
+            # llarpd logs nothing when the exit answers, so prove it: does traffic get through?
+            if self.probe_exit(use_exit):
+                return {"exit": use_exit, "state": "on", "detail": f"internet traffic goes through {use_exit}"}
+            started = self.state().get("started_at") or 0
+            if now - started < EXIT_ANSWER_GRACE:
+                return {"exit": use_exit, "state": "connecting", "detail": f"waiting for {use_exit} to answer…"}
+            return {
+                "exit": use_exit,
+                "state": "trouble",
+                "detail": f"{use_exit} was found, but no traffic gets through it: it may be offline, "
+                "not running as an exit, or need an auth code (still retrying)",
+            }
         if routed:
             return {"exit": use_exit, "state": "connecting", "detail": f"looking for {use_exit} on the network…"}
         return {"exit": use_exit, "state": "connecting", "detail": f"connecting to {use_exit}…"}
@@ -994,6 +1178,8 @@ class Controller:
         """Add from a URL, a file path, or the name of a bundled bootstrap."""
         if source.startswith(("http://", "https://")):
             return self.add_bootstrap_url(source)
+        if IS_WSL and WINDOWS_PATH_RE.match(source):
+            source = wslpath(source)
         if not Path(source).expanduser().exists():
             bundled = BUNDLED_DIR / source
             if bundled.suffix != ".signed":
@@ -1068,6 +1254,121 @@ class Controller:
 
     def mark_nat(self, target):
         self._update_state(nat=list(target) if target else None)
+
+    # ---- Windows host (LLARP Control for Windows runs llarpd in a WSL distro)
+
+    @staticmethod
+    def _bridge_rules(tun, eth):
+        # masquerade: llarpd only delivers replies to its own tunnel address
+        return [
+            ["-t", "nat", "POSTROUTING", "-o", tun, "-j", "MASQUERADE"],
+            ["FORWARD", "-i", eth, "-o", tun, "-j", "ACCEPT"],
+            ["FORWARD", "-i", tun, "-o", eth, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"],
+        ]
+
+    @staticmethod
+    def _mss_rule(tun):
+        # Windows sends full-size packets; clamp TCP to what fits the tunnel (best effort)
+        return ["-t", "mangle", "FORWARD", "-o", tun, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
+                "-j", "TCPMSS", "--clamp-mss-to-pmtu"]
+
+    @staticmethod
+    def wsl_peer_routes(eth):
+        """Host routes llarpd's route poker added for its relays while routing through an
+        exit (`<ip> via <gateway> dev <eth>`): the Windows host must send these direct too."""
+        try:
+            out = subprocess.run(["ip", "-4", "route", "show"], capture_output=True, text=True).stdout
+        except OSError:
+            return []
+        peers = []
+        for line in out.splitlines():
+            m = re.match(r"^(\d+\.\d+\.\d+\.\d+) via \S+ dev (\S+)", line)
+            if m and m.group(2) == eth and is_public_ipv4(m.group(1)):
+                peers.append(m.group(1))
+        return sorted(set(peers))
+
+    @staticmethod
+    def _iptables(rule, op):
+        """op: -C (check), -A (append) or -D (delete). Returns the CompletedProcess."""
+        if rule[0] == "-t":
+            argv = ["iptables", rule[0], rule[1], op] + rule[2:]
+        else:
+            argv = ["iptables", op] + rule
+        try:
+            return subprocess.run(argv, capture_output=True, text=True)
+        except OSError as e:
+            raise LlarpError(f"iptables is not available: {e}") from e
+
+    def windows_bridge(self, enable=None):
+        """Inside WSL: let the Windows host reach .loki through this distro.
+
+        enable=True forwards traffic from the WSL network into llarpd's tunnel (iptables),
+        False removes that, None only reports. Returns what the Windows side needs: our
+        address on the WSL network, the tunnel range to route here and the DNS server."""
+        if not IS_WSL:
+            raise LlarpError("winhost only works inside WSL (LLARP Control for Windows)")
+        running = self.is_running()
+        router = bool(self.settings.get("router_mode"))
+        self.scan_log()
+        tun = self._scan["tun"] if running else None
+        rng = self._scan["range"] if running else None
+        eth = default_route_iface()
+        wsl_ip = iface_ipv4(eth) if eth else None
+        applied = self.state().get("winbridge")
+        wanted = [tun, eth] if enable and running and not router and tun and eth else None
+        if wanted and not all(IFACE_RE.match(x) for x in wanted):
+            raise LlarpError(f"unexpected interface names: {wanted}")
+
+        if applied and applied != wanted and enable is not None:
+            for rule in self._bridge_rules(*applied):
+                self._iptables(rule, "-D")
+            self._iptables(self._mss_rule(applied[0]), "-D")
+            self._update_state(winbridge=None)
+            applied = None
+        if wanted and applied != wanted:
+            try:
+                Path("/proc/sys/net/ipv4/ip_forward").write_text("1\n")
+            except OSError as e:
+                raise LlarpError(f"could not turn on IP forwarding: {e}") from e
+            for rule in self._bridge_rules(*wanted):
+                if self._iptables(rule, "-C").returncode != 0:
+                    res = self._iptables(rule, "-A")
+                    if res.returncode != 0:
+                        raise LlarpError(f"iptables failed: {(res.stderr or res.stdout).strip()}")
+            mss = self._mss_rule(tun)
+            if self._iptables(mss, "-C").returncode != 0:
+                self._iptables(mss, "-A")
+            self._update_state(winbridge=wanted)
+            applied = wanted
+            self.note(f"Windows host: forwarding {eth} -> {tun} ({rng})")
+
+        try:
+            dns_ok = bool(wsl_ip) and f"bind={wsl_ip}:53" in self.override_file().read_text()
+        except OSError:
+            dns_ok = False
+        # VPN through an exit: llarpd sends everything into its tunnel once 0.0.0.0/1 points
+        # there; its relays stay reachable via host routes the Windows side mirrors
+        vpn = None
+        use_exit = self.settings.get("use_exit")
+        if use_exit and running and not router:
+            routed = bool(tun) and half_default_route_dev() == tun
+            vpn = {
+                "exit": use_exit,
+                "state": self.vpn_status()["state"],
+                "routed": routed,
+                "peers": self.wsl_peer_routes(eth) if routed and eth else [],
+            }
+        return {
+            "running": running,
+            "router_mode": router,
+            "wsl_ip": wsl_ip,
+            "tun": tun,
+            "range": rng if rng and IPV4_RANGE_RE.match(rng) else None,
+            "dns": wsl_ip if running and dns_ok and not router else None,
+            "public_port": int(self.settings.get("public_port") or 1090),
+            "bridged": applied is not None,
+            "vpn": vpn,
+        }
 
     # ---- config generation
 

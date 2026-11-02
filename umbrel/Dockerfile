@@ -40,9 +40,10 @@ RUN ldd /usr/local/bin/llarpd | awk '/=> \// {print $3}' | xargs -r realpath \
 FROM debian:trixie-slim
 
 COPY --from=build /llarpd-deps.txt /tmp/llarpd-deps.txt
+# geoip-database: llarpd segfaults picking path hops without /usr/share/GeoIP/GeoIP.dat
 RUN apt-get update -q \
  && apt-get install -y -q --no-install-recommends \
-      $(cat /tmp/llarpd-deps.txt) python3 iproute2 nftables procps ca-certificates \
+      $(cat /tmp/llarpd-deps.txt) geoip-database python3 iproute2 nftables procps ca-certificates \
  && rm -rf /var/lib/apt/lists/* /tmp/llarpd-deps.txt
 
 COPY --from=build /usr/local/bin/llarpd /usr/local/bin/llarpd

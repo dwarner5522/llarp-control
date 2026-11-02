@@ -41,6 +41,13 @@ chmod +x LLARP_Control-*-x86_64.AppImage
 
 Build it with `./make-appimage.sh` (needs [appimagetool](https://github.com/AppImage/appimagetool/releases)).
 
+## Windows
+
+[llarp-control-windows](https://github.com/dwarner5522/llarp-control-windows) is the Windows
+edition: a self-installing `LLARP-Control.exe` that runs llarpd in a WSL 2 distro (llarpd has no
+Windows port) and connects it to Windows: `.loki` names in Windows apps, router (snode) mode, exit
+node, and VPN through an exit. It carries copies of `llarpctl` and `llarp_core.py` from this repo.
+
 ## VPS bundle (builds llarpd too)
 
 The easiest way: download the prebuilt bundle from the
@@ -104,4 +111,12 @@ llarpctl --help
   forward that UDP port (default 1090) on the router to this machine.
 - The VPN client and the exit node must run compatible llarpd versions. If the exit
   answers but its replies can't be read, compare `llarpd --version` on both machines.
+- The VPN only shows as connected once traffic actually gets through the exit. Until then it
+  waits, and then reports that the exit doesn't answer (offline, not an exit, or it needs an
+  auth code).
+- After days of uptime llarpd can get stuck: it can't build paths ("no first hop
+  candidate") but keeps running and keeps advertising itself, so an exit stops working
+  without any visible sign. `llarpctl status` and the GUI flag this after 10 minutes. Under
+  systemd (`llarpctl autostart on`) and on Umbrel, a watchdog restarts llarpd automatically.
+  An exit node should run with autostart on.
 - Settings, state and the llarpd log live in `~/.config/llarp-gui/`.
