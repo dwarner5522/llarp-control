@@ -5,6 +5,7 @@ state file), so it keeps running when the GUI closes or the SSH session ends, an
 either front end can control a daemon the other one started.
 """
 
+import contextlib
 import hashlib
 import ipaddress
 import json
@@ -15,10 +16,16 @@ import shutil
 import signal
 import socket
 import subprocess
+import threading
 import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # not on Windows (only the tests run there)
+    fcntl = None
 
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "llarp-gui"
 BOOTSTRAP_DIR = CONFIG_DIR / "bootstraps"
@@ -342,18 +349,51 @@ def llarpd_pids():
 
 def _read_json(path, default):
     try:
-        return json.loads(Path(path).read_text())
-    except (OSError, ValueError):
+        text = Path(path).read_text()
+    except OSError:
+        return default
+    try:
+        return json.loads(text)
+    except ValueError:
+        pass
+    # older versions could leave a complete object followed by debris when two processes wrote
+    # at once ("{...}}"): keep the first object rather than losing all state
+    try:
+        value, _ = json.JSONDecoder().raw_decode(text.lstrip())
+        return value if isinstance(value, type(default)) else default
+    except ValueError:
         return default
 
 
 def _write_json(path, data):
+    """Atomic replace through a temp file unique to this writer (several llarpctl processes,
+    the GUIs and the Windows host write at the same time)."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = Path(path).with_suffix(".tmp")
+    path = Path(path)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # may hold exit auth codes
-    with os.fdopen(fd, "w") as f:
-        f.write(json.dumps(data, indent=2))
-    tmp.replace(path)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(data, indent=2))
+        tmp.replace(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+@contextlib.contextmanager
+def _locked(path):
+    """Exclusive lock around a read-modify-write of a JSON file (no-op where fcntl is missing)."""
+    if fcntl is None:
+        yield
+        return
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    fd = os.open(Path(path).with_name(f".{Path(path).name}.lock"), os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
 
 
 def format_uptime(seconds):
@@ -506,9 +546,10 @@ class Controller:
         return _read_json(STATE_FILE, {})
 
     def _update_state(self, **changes):
-        st = self.state()
-        st.update(changes)
-        _write_json(STATE_FILE, st)
+        with _locked(STATE_FILE):  # don't lose another process's change made in between
+            st = self.state()
+            st.update(changes)
+            _write_json(STATE_FILE, st)
         return st
 
     def pid(self):
