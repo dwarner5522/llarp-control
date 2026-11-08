@@ -12,7 +12,8 @@ REPO=${1:-$HERE/../llarp}
 OUTDIR=$(realpath -m "${2:-$HERE/..}")
 TOOL=${APPIMAGETOOL:-$(command -v appimagetool || true)}
 [ -x "$TOOL" ] || { echo "appimagetool not found; get it from https://github.com/AppImage/appimagetool/releases" >&2; exit 1; }
-VERSION=$(git -C "$HERE" describe --tags --always --dirty 2>/dev/null || echo dev)
+VERSION=${APPIMAGE_VERSION:-}
+[ -n "$VERSION" ] || VERSION=$(git -C "$HERE" describe --tags --match 'v[0-9]*' --always --dirty 2>/dev/null || echo dev)
 VERSION=${VERSION#v}
 
 WORK=$(mktemp -d)
