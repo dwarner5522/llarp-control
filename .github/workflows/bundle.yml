@@ -1,7 +1,7 @@
 name: VPS bundle
 
 # Builds llarp-control-bundle.tar.gz (llarpd source with submodules + llarpctl + installer)
-# and publishes it as a release. Release: push a tag like v1.3.0.
+# and the desktop AppImage, and publishes both as a release. Release: push a tag like v1.3.0.
 # The llarp commit is the one pinned in umbrel/Dockerfile, so the bundle and the Umbrel image
 # build the same llarpd.
 
@@ -42,17 +42,34 @@ jobs:
           python3 "$b/llarp-control/llarpctl" --help > /dev/null
           echo "llarpd $(cat $b/VERSION), llarp-control $(cat $b/llarp-control/VERSION)"
 
+      - name: Build the AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1" # no FUSE on the runner
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends python3-gi python3-gi-cairo python3-cairo gir1.2-gtk-3.0
+          curl -sSLf -o appimagetool https://github.com/AppImage/appimagetool/releases/download/1.9.0/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          version=$(git describe --tags --match 'v[0-9]*' --always)
+          [ "$GITHUB_REF_TYPE" = tag ] && version=$GITHUB_REF_NAME
+          APPIMAGE_VERSION=${version#v} APPIMAGETOOL=$PWD/appimagetool ./make-appimage.sh ../llarp "$PWD"
+          appimage=$(ls LLARP_Control-*-x86_64.AppImage)
+          "./$appimage" ctl --help > /dev/null
+          echo "APPIMAGE=$appimage" >> "$GITHUB_ENV"
+
       - uses: actions/upload-artifact@v4
         with:
           name: llarp-control-bundle
-          path: llarp-control-bundle.tar.gz
+          path: |
+            llarp-control-bundle.tar.gz
+            ${{ env.APPIMAGE }}
 
       - name: Release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" llarp-control-bundle.tar.gz \
+          gh release create "$GITHUB_REF_NAME" llarp-control-bundle.tar.gz "$APPIMAGE" \
             --title "LLARP Control ${GITHUB_REF_NAME#v}" \
             --notes-file - <<'EOF'
           VPS bundle: llarpd source, llarpctl and a one-shot installer.
@@ -66,4 +83,15 @@ jobs:
           Updating an existing install: unpack the new bundle and run `sudo ./install.sh` again.
           For an exit node, run llarpd under systemd (`llarpctl autostart on`) so the watchdog can
           restart it if it gets stuck. See README.txt in the bundle.
+
+          **Desktop AppImage** (`LLARP_Control-*-x86_64.AppImage`): the LLARP Control window and llarpctl in one file.
+
+          ```sh
+          chmod +x LLARP_Control-*-x86_64.AppImage
+          ./LLARP_Control-*-x86_64.AppImage              # the GUI
+          ./LLARP_Control-*-x86_64.AppImage ctl status   # llarpctl
+          ```
+
+          It uses the system's Python 3 and GTK 3 (Ubuntu: `sudo apt install python3-gi gir1.2-gtk-3.0` if missing).
+          llarpd must be installed separately, e.g. with the VPS bundle above, since it needs setcap'd network capabilities.
           EOF
