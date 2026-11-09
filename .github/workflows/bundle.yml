@@ -40,6 +40,7 @@ jobs:
           if grep -rlI $'\r' "$b/install.sh" "$b/llarp-control"; then echo "CRLF in the bundle" >&2; exit 1; fi
           bash -n "$b/install.sh"
           python3 "$b/llarp-control/llarpctl" --help > /dev/null
+          test -s "$b/llarp-control/bootstrap/opennet.signed"
           echo "llarpd $(cat $b/VERSION), llarp-control $(cat $b/llarp-control/VERSION)"
 
       - name: Build the AppImage
@@ -52,7 +53,7 @@ jobs:
           chmod +x appimagetool
           version=$(git describe --tags --match 'v[0-9]*' --always)
           [ "$GITHUB_REF_TYPE" = tag ] && version=$GITHUB_REF_NAME
-          APPIMAGE_VERSION=${version#v} APPIMAGETOOL=$PWD/appimagetool ./make-appimage.sh ../llarp "$PWD"
+          APPIMAGE_VERSION=${version#v} APPIMAGETOOL=$PWD/appimagetool ./make-appimage.sh "$PWD"
           appimage=$(ls LLARP_Control-*-x86_64.AppImage)
           "./$appimage" ctl --help > /dev/null
           echo "APPIMAGE=$appimage" >> "$GITHUB_ENV"

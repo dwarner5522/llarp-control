@@ -13,7 +13,8 @@ mkdir -p "$dest" "$bindir"
 install -m 644 "$src/llarp_core.py" "$dest/"
 install -m 755 "$src/llarpctl" "$dest/"
 ln -sf "$dest/llarpctl" "$bindir/llarpctl"
-bundled=$src/../llarp/contrib/bootstrap
+bundled=$src/bootstrap
+[ -d "$bundled" ] || bundled=$src/../llarp/contrib/bootstrap
 if [ -d "$bundled" ]; then
     mkdir -p "$dest/bootstrap"
     install -m 644 "$bundled"/*.signed "$dest/bootstrap/"

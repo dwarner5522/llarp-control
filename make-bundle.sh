@@ -38,13 +38,14 @@ echo "$TAG" > "$STAGE/VERSION"
 echo "==> adding llarpctl"
 # from the committed version, not the working tree: on a Windows checkout the working tree can
 # have CRLF line endings, which would break every script on the VPS
-if [ -n "$(git -C "$HERE" status --porcelain --untracked-files=no -- llarp_core.py llarpctl llarp_gui.py install.sh bundle)" ]; then
+if [ -n "$(git -C "$HERE" status --porcelain --untracked-files=no -- llarp_core.py llarpctl llarp_gui.py install.sh bundle bootstrap)" ]; then
     echo "warning: uncommitted changes in llarp-control; the bundle uses the committed version" >&2
 fi
-CTL_REV=$(git -C "$HERE" describe --tags --always --dirty 2>/dev/null || echo unknown)
+CTL_REV=$(git -C "$HERE" describe --tags --match 'v[0-9]*' --always --dirty 2>/dev/null || echo unknown)
 mkdir -p "$STAGE/llarp-control" "$WORK/ctl"
-git -C "$HERE" archive HEAD llarp_core.py llarpctl llarp_gui.py install.sh bundle | tar -C "$WORK/ctl" -xf -
+git -C "$HERE" archive HEAD llarp_core.py llarpctl llarp_gui.py install.sh bundle bootstrap | tar -C "$WORK/ctl" -xf -
 cp "$WORK/ctl/llarp_core.py" "$WORK/ctl/llarpctl" "$WORK/ctl/llarp_gui.py" "$WORK/ctl/install.sh" "$STAGE/llarp-control/"
+cp -r "$WORK/ctl/bootstrap" "$STAGE/llarp-control/"
 cp "$WORK/ctl/bundle/install.sh" "$WORK/ctl/bundle/README.txt" "$STAGE/"
 echo "$CTL_REV" > "$STAGE/llarp-control/VERSION"
 chmod +x "$STAGE/install.sh" "$STAGE/llarp-control/install.sh" "$STAGE/llarp-control/llarpctl"

@@ -3,13 +3,12 @@
 # bootstrap files. Uses the system's python3 + GTK 3; llarpd stays installed separately
 # (it needs setcap'd network capabilities, which can't work from inside an AppImage).
 #
-#   ./make-appimage.sh [path/to/llarp/repo] [output-dir]
+#   ./make-appimage.sh [output-dir]
 # Needs appimagetool in PATH (or APPIMAGETOOL=/path/to/appimagetool).
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-REPO=${1:-$HERE/../llarp}
-OUTDIR=$(realpath -m "${2:-$HERE/..}")
+OUTDIR=$(realpath -m "${1:-$HERE/..}")
 TOOL=${APPIMAGETOOL:-$(command -v appimagetool || true)}
 [ -x "$TOOL" ] || { echo "appimagetool not found; get it from https://github.com/AppImage/appimagetool/releases" >&2; exit 1; }
 VERSION=${APPIMAGE_VERSION:-}
@@ -26,11 +25,7 @@ install -m 755 "$HERE/appimage/AppRun" "$APPDIR/AppRun"
 install -m 644 "$HERE/appimage/llarp-control.desktop" "$APPDIR/"
 install -m 644 "$HERE/llarp_core.py" "$APP/"
 install -m 755 "$HERE/llarp_gui.py" "$HERE/llarpctl" "$APP/"
-if [ -d "$REPO/contrib/bootstrap" ]; then
-    install -m 644 "$REPO"/contrib/bootstrap/*.signed "$APP/bootstrap/"
-else
-    echo "warning: no llarp checkout at $REPO; the AppImage won't include bundled bootstraps" >&2
-fi
+install -m 644 "$HERE"/bootstrap/*.signed "$APP/bootstrap/"
 
 # icon: the app's diamond logo on its dark background
 python3 - "$HERE" "$APPDIR/llarp-control.png" <<'PY'

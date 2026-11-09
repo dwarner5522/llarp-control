@@ -51,7 +51,7 @@ RUN ! ldd /usr/local/bin/llarpd | grep "not found" && llarpd --version
 
 COPY llarp_core.py umbrel/umbrel_node.py umbrel/umbrel_bridge.py /app/
 COPY umbrel/web /app/web
-COPY umbrel/bootstrap /app/bootstrap
+COPY bootstrap /app/bootstrap
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 LLARP_DATA=/data
 LABEL org.opencontainers.image.source="https://github.com/dwarner5522/llarp-control" \

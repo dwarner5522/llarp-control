@@ -33,9 +33,10 @@ SETTINGS_FILE = CONFIG_DIR / "settings.json"
 STATE_FILE = CONFIG_DIR / "state.json"
 LOG_FILE = CONFIG_DIR / "llarpd.log"
 _HERE = Path(__file__).resolve().parent
-# next to the repo checkout, or the copy install.sh puts beside an installed llarpctl
+# this repo's own bootstraps (kept current; upstream's contrib/bootstrap lists relays that are
+# gone), or else those of an llarp checkout next to it
 BUNDLED_DIR = next(
-    (d for d in (_HERE.parent / "llarp" / "contrib" / "bootstrap", _HERE / "bootstrap") if d.is_dir()),
+    (d for d in (_HERE / "bootstrap", _HERE.parent / "llarp" / "contrib" / "bootstrap") if d.is_dir()),
     _HERE / "bootstrap",
 )
 
@@ -695,6 +696,7 @@ class Controller:
         if problem:
             raise LlarpError(problem)
         self._write_override()
+        self.update_bundled_bootstraps()
         if IS_WSL and ensure_wsl_dns():
             self.note(f"{RESOLV_CONF} was missing; wrote public resolvers (Quad9, Cloudflare)")
         cmd, env, files = self._command_and_env()
@@ -1266,6 +1268,31 @@ class Controller:
             if bundled.exists():
                 return self.add_bootstrap_path(bundled)
         return self.add_bootstrap_path(source)
+
+    def update_bundled_bootstraps(self):
+        """Bring added copies of bundled bootstraps (same name, e.g. opennet.signed) up to date
+        with the bundled file, since a stale copy can point only at relays that are gone. The
+        entry keeps its place and its enabled flag. Returns the names updated."""
+        updated = []
+        for src in self.bundled_bootstraps():
+            try:
+                data = src.read_bytes()
+                inspect_bootstrap(data)
+            except Exception:  # noqa: BLE001
+                continue
+            for entry in self.settings["bootstraps"]:
+                dest = Path(entry["file"])
+                if entry["name"] != src.name or not dest.is_file():
+                    continue
+                try:
+                    if dest.read_bytes() != data:
+                        dest.write_bytes(data)
+                        updated.append(entry["name"])
+                except OSError:
+                    pass
+        for name in updated:
+            self.note(f"updated bootstrap {name} to the bundled version")
+        return updated
 
     def bundled_bootstraps(self):
         return sorted(BUNDLED_DIR.glob("*.signed")) if BUNDLED_DIR.is_dir() else []

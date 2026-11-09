@@ -94,6 +94,7 @@ def setup():
                 ctl.add_bootstrap_path(f)
             except LlarpError as e:
                 log(f"bundled bootstrap {f.name}: {e}")
+    ctl.update_bundled_bootstraps()
 
     try:
         state.update(json.loads(STATE_FILE.read_text()))

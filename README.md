@@ -123,3 +123,7 @@ llarpctl --help
   after the exit restarted). If no traffic gets through for 3 minutes, llarpd is restarted for a
   fresh session, waiting twice as long after each try that doesn't help (up to 30 minutes).
 - Settings, state and the llarpd log live in `~/.config/llarp-gui/`.
+- `bootstrap/opennet.signed` lists two live opennet relays. It's bundled with the GUI, llarpctl,
+  the AppImage, the VPS bundle and the Umbrel app. When llarpd starts, an added copy of a bundled
+  bootstrap (same name) is updated to the bundled version, keeping whether it's enabled.
+  Upstream's `contrib/bootstrap/opennet.signed` only lists a relay that's offline now.
